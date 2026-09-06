@@ -1,0 +1,3 @@
+# Keep the repository language bar focused on runnable source code.
+paper/** linguist-documentation
+paper/cumcmthesis.cls linguist-vendored

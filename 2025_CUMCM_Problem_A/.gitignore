@@ -1,0 +1,19 @@
+# LaTeX build artifacts
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.synctex.gz
+*.toc
+*.fls
+*.fdb_latexmk
+
+# MATLAB temporary files
+*.asv
+*.m~
+
+# OS/editor files
+.DS_Store
+Thumbs.db
+desktop.ini
