@@ -1,4 +1,4 @@
-name: cumcm2026-b
+name:cumcm2026-b
 channels:
   - defaults
 dependencies:

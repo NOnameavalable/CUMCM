@@ -1,1 +1,38 @@
 *:Zone.Identifier
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE & Editor Settings
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Environments
+.env
+.env.*
+!.env.example
+venv/
+.venv/
+env/
+.conda/
+
+# Testing & Cache
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# Local Notes & Artifacts
+P2_explanation.md
+P2_demo.png
+P2_result.png

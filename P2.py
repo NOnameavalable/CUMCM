@@ -408,7 +408,7 @@ def _candidate_bounds(
         max(0.0, max(a_values)) + config.candidate_margin,
     )
     b_bounds = config.candidate_b_bounds or (
-        min(min(b_values) - config.candidate_margin, -config.candidate_lateral_extent),
+        0.0,
         max(max(b_values) + config.candidate_margin, config.candidate_lateral_extent),
     )
     return a_bounds, b_bounds
@@ -430,7 +430,7 @@ def _generate_candidate_grid(
     spacing: float | None = None,
     windows: Sequence[tuple[float, float, float]] | None = None,
 ) -> list[tuple[Point, float, float]]:
-    """在局部坐标中生成全域粗网格或若干局部细网格。"""
+    """在局部坐标中生成全域粗网格或若干局部细网格（仅在单侧 b >= 0 采样）。"""
     basis = _make_local_basis(first_bearing_deg)
     step = spacing or config.candidate_grid_spacing
     if windows is None:
@@ -455,6 +455,8 @@ def _generate_candidate_grid(
             a_bounds, b_bounds = explicit_bounds
         for a in _inclusive_range(*a_bounds, step):
             for b in _inclusive_range(*b_bounds, step):
+                if b < -1e-9:
+                    continue  # 利用示向对称性，仅在同一侧 (b >= 0) 进行采样
                 point = _local_to_global(first_position, float(a), float(b), basis)
                 if point.distance_to(first_position) <= 1e-9:
                     continue  # 同一位置重复检测的误差不会改变。
@@ -996,7 +998,15 @@ def plot_problem_2_result(
     from matplotlib import font_manager
 
     available_fonts = {font.name for font in font_manager.fontManager.ttflist}
-    for preferred_font in ("Microsoft YaHei", "Noto Sans SC", "SimHei"):
+    for preferred_font in (
+        "PingFang SC",
+        "Arial Unicode MS",
+        "Heiti SC",
+        "STHeiti",
+        "Microsoft YaHei",
+        "Noto Sans SC",
+        "SimHei",
+    ):
         if preferred_font in available_fonts:
             plt.rcParams["font.sans-serif"] = [preferred_font, "DejaVu Sans"]
             plt.rcParams["axes.unicode_minus"] = False
@@ -1028,7 +1038,7 @@ def plot_problem_2_result(
     axis.set_ylabel("y / m")
     axis.set_title("问题2：第二检测点搜索结果")
     axis.grid(alpha=0.2)
-    axis.legend(loc="best")
+    axis.legend(loc="upper left", framealpha=0.85)
     figure.tight_layout()
     if output_path is not None:
         figure.savefig(Path(output_path), dpi=180, bbox_inches="tight")
@@ -1055,17 +1065,41 @@ def print_result_summary(result: Problem2Result) -> None:
 
 
 def main() -> None:
-    """运行一组明确标记为演示的参数。"""
-    demo_config = Problem2Config(
-        target_grid_spacing=60.0,
-        candidate_grid_spacing=200.0,
-        refined_grid_spacing=50.0,
-        refinement_seed_count=4,
-    )
-    result = solve_problem_2((0.0, 0.0), 0.0, demo_config)
-    print("注意：以下为程序连通性演示，不是题目正式最优结论。")
+    """支持快速演示或正式高精度数值求解。"""
+    import argparse
+
+    parser = argparse.ArgumentParser(description="CUMCM 2026 B题 问题2：第二检测点选择与候选区域求解")
+    parser.add_argument("--full", action="store_true", help="使用正式高精度物理与网格参数运行 (默认目标步长20m, 粗筛100m, 细筛25m, 种子8个)")
+    parser.add_argument("--x", type=float, default=0.0, help="第一次检测点 x 坐标 (米，默认 0.0)")
+    parser.add_argument("--y", type=float, default=0.0, help="第一次检测点 y 坐标 (米，默认 0.0)")
+    parser.add_argument("--bearing", type=float, default=0.0, help="第一次测得的示向度 (度，默认 0.0)")
+    parser.add_argument("--out", type=str, default=None, help="图片保存路径")
+    args = parser.parse_args()
+
+    first_pos = (args.x, args.y)
+    bearing = args.bearing
+
+    if args.full:
+        config = Problem2Config()
+        out_path = args.out or "P2_result.png"
+        print(f">>> 正在使用【正式高精度参数】求解：检测点={first_pos}, 示向度={bearing}° ...")
+        print(">>> 网格参数：目标间距 20m, 粗筛间距 100m, 细筛间距 25m, 种子数 8")
+        print(">>> 正在进行全情景后验推断与双层网格优化（预计耗时 1~2 分钟）...")
+    else:
+        config = Problem2Config(
+            target_grid_spacing=60.0,
+            candidate_grid_spacing=200.0,
+            refined_grid_spacing=50.0,
+            refinement_seed_count=4,
+        )
+        out_path = args.out or "P2_demo.png"
+        print(">>> 当前运行模式：【快速演示模式】。")
+        print(">>> 如需按照论文正式高精度数值求解，请运行：python P2.py --full\n")
+
+    result = solve_problem_2(first_pos, bearing, config)
     print_result_summary(result)
-    plot_problem_2_result(result, "P2_demo.png")
+    plot_problem_2_result(result, out_path)
+    print(f"\n可视化图像已保存至: {out_path}")
 
 
 if __name__ == "__main__":
