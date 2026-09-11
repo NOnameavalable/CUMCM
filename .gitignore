@@ -33,6 +33,5 @@ htmlcov/
 .mypy_cache/
 
 # Local Notes & Artifacts
-P2_explanation.md
 P2_demo.png
 P2_result.png
