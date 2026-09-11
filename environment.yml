@@ -1,0 +1,14 @@
+name: cumcm2026-b
+channels:
+  - defaults
+dependencies:
+  - python=3.12
+  - numpy
+  - scipy
+  - shapely
+  - requests
+  - pandas
+  - matplotlib
+  - openpyxl
+  - pytest
+  - pip
