@@ -1065,27 +1065,21 @@ def print_result_summary(result: Problem2Result) -> None:
 
 
 def main() -> None:
-    """支持快速演示或正式高精度数值求解。"""
+    """支持正式高精度数值求解（默认）或快速演示。"""
     import argparse
 
     parser = argparse.ArgumentParser(description="CUMCM 2026 B题 问题2：第二检测点选择与候选区域求解")
-    parser.add_argument("--full", action="store_true", help="使用正式高精度物理与网格参数运行 (默认目标步长20m, 粗筛100m, 细筛25m, 种子8个)")
+    parser.add_argument("--demo", action="store_true", help="使用快速演示参数运行 (目标步长60m, 粗筛200m, 细筛50m, 种子4个)")
     parser.add_argument("--x", type=float, default=0.0, help="第一次检测点 x 坐标 (米，默认 0.0)")
     parser.add_argument("--y", type=float, default=0.0, help="第一次检测点 y 坐标 (米，默认 0.0)")
     parser.add_argument("--bearing", type=float, default=0.0, help="第一次测得的示向度 (度，默认 0.0)")
-    parser.add_argument("--out", type=str, default=None, help="图片保存路径")
+    parser.add_argument("--out", type=str, default=None, help="图片保存路径 (默认全功能为 P2_result.png, demo 为 P2_demo.png)")
     args = parser.parse_args()
 
     first_pos = (args.x, args.y)
     bearing = args.bearing
 
-    if args.full:
-        config = Problem2Config()
-        out_path = args.out or "P2_result.png"
-        print(f">>> 正在使用【正式高精度参数】求解：检测点={first_pos}, 示向度={bearing}° ...")
-        print(">>> 网格参数：目标间距 20m, 粗筛间距 100m, 细筛间距 25m, 种子数 8")
-        print(">>> 正在进行全情景后验推断与双层网格优化（预计耗时 1~2 分钟）...")
-    else:
+    if args.demo:
         config = Problem2Config(
             target_grid_spacing=60.0,
             candidate_grid_spacing=200.0,
@@ -1093,8 +1087,15 @@ def main() -> None:
             refinement_seed_count=4,
         )
         out_path = args.out or "P2_demo.png"
-        print(">>> 当前运行模式：【快速演示模式】。")
-        print(">>> 如需按照论文正式高精度数值求解，请运行：python P2.py --full\n")
+        print(">>> 当前运行模式：【快速演示模式】(--demo)。")
+        print(">>> 网格参数：目标间距 60m, 粗筛间距 200m, 细筛间距 50m, 种子数 4\n")
+    else:
+        config = Problem2Config()
+        out_path = args.out or "P2_result.png"
+        print(f">>> 当前运行模式：【默认全功能高精度模式】检测点={first_pos}, 示向度={bearing}° ...")
+        print(">>> 网格参数：目标间距 20m, 粗筛间距 100m, 细筛间距 25m, 种子数 8")
+        print(">>> 正在进行全情景后验推断与双层网格优化（预计耗时 1~2 分钟）...")
+        print(">>> 提示：如需秒级快速测试，可追加 --demo 参数\n")
 
     result = solve_problem_2(first_pos, bearing, config)
     print_result_summary(result)
