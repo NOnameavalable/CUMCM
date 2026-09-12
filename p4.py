@@ -442,7 +442,8 @@ def refresh_channel_tasks_p4(
         mid_s = 0.5 * (searcher.s_min + searcher.s_max)
         mid = searcher.depth_to_point(mid_s)
 
-        if span <= 4.0 * config.clear_radius + 1e-9:
+        if span <= 29:
+                # 2.0 * config.clear_radius + 1e-9):
             # 跨度 <= 80m：二分中点发射一炮
             belief.center_clear_allows_residual = True
             planner.replace_channel_tasks(
