@@ -2,7 +2,17 @@ import random
 
 import pytest
 
-from utils import DetectionSector, Point, Polygon, Ray, Segment, TargetArea
+from utils import (
+    DetectionSector,
+    Point,
+    Polygon,
+    Ray,
+    Region,
+    Segment,
+    TargetArea,
+    minimum_enclosing_circle,
+    region_diameter,
+)
 
 
 def polygon_from_vertices(vertices):
@@ -129,3 +139,25 @@ def test_invalid_sector_width_is_rejected(target, square):
         target.intersect_detection_area(
             square, DetectionSector(Ray(Point(0, 0), 0), Ray(Point(0, 0), 181))
         )
+
+
+def test_region_wraps_sector_intersection_and_disk_difference():
+    target_region = Region.disk(Point(0.0, 0.0), 100.0)
+    sector = DetectionSector.from_measurement(Point(-50.0, 0.0), 0.0, 10.0)
+    feasible = target_region.intersection(sector.to_region(120.0, 5.0))
+
+    assert feasible.area > 0.0
+    assert feasible.contains(Point(0.0, 0.0))
+    assert not feasible.contains(Point(-50.0, 0.0))
+
+
+def test_region_diameter_and_minimum_circle_share_public_point_model():
+    region = Region.from_vertices([
+        Point(0.0, 0.0), Point(4.0, 0.0), Point(4.0, 3.0), Point(0.0, 3.0)
+    ])
+    diameter = region_diameter(region)
+    circle = minimum_enclosing_circle(region.vertices)
+
+    assert diameter.length == pytest.approx(5.0)
+    assert circle.radius == pytest.approx(2.5)
+    assert all(circle.contains(vertex) for vertex in region.vertices)

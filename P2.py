@@ -15,16 +15,17 @@ from __future__ import annotations
 from dataclasses import dataclass, field, replace
 from math import cos, hypot, isfinite, log10, radians, sin, sqrt
 from pathlib import Path
-from typing import Iterable, Literal, Sequence
+from typing import Literal, Sequence
 
 import numpy as np
-from shapely.geometry import GeometryCollection, MultiPolygon
-from shapely.geometry import Point as ShapelyPoint
-from shapely.geometry import Polygon as ShapelyPolygon
-from shapely.geometry.base import BaseGeometry
-from shapely.ops import unary_union
 
-from utils import Point
+from utils import (
+    Circle,
+    DetectionSector,
+    Point,
+    Region,
+    minimum_enclosing_circle,
+)
 
 
 ObservationKind = Literal["direction", "near", "no_signal"]
@@ -118,7 +119,7 @@ class TargetCell:
 
     index: int
     representative: Point
-    geometry: BaseGeometry
+    geometry: Region
     area: float
     weight: float
     cell_radius: float
@@ -187,14 +188,14 @@ class Problem2Result:
     config: Problem2Config
     first_position: Point
     first_bearing_deg: float
-    first_feasible_region: BaseGeometry
+    first_feasible_region: Region
     target_cells: list[TargetCell]
     states: list[StateSample]
-    safe_candidate_region: BaseGeometry
+    safe_candidate_region: Region
     candidates: list[CandidateMetrics]
     best_candidate: CandidateMetrics
     pareto_candidates: list[CandidateMetrics]
-    recommended_region: BaseGeometry
+    recommended_region: Region
 
 
 def _validate_inputs(first_position: Sequence[float], first_bearing_deg: float) -> Point:
@@ -247,29 +248,19 @@ def _build_first_feasible_region(
     first_position: Point,
     first_bearing_deg: float,
     config: Problem2Config,
-) -> BaseGeometry:
+) -> Region:
     """构造目标圆域、距离约束与第一次方向带的连续交集。"""
-    target_disk = ShapelyPoint(0.0, 0.0).buffer(
-        config.target_radius, quad_segs=config.circle_quad_segs
+    target_disk = Region.disk(
+        Point(0.0, 0.0), config.target_radius, config.circle_quad_segs
     )
-    origin = ShapelyPoint(first_position.x, first_position.y)
-    outer_disk = origin.buffer(config.receive_radius_max, quad_segs=config.circle_quad_segs)
-    inner_disk = origin.buffer(config.near_radius, quad_segs=max(8, config.circle_quad_segs // 4))
-
-    angles = np.linspace(
-        first_bearing_deg - config.bearing_error_deg,
-        first_bearing_deg + config.bearing_error_deg,
+    sector = DetectionSector.from_measurement(
+        first_position, first_bearing_deg, config.bearing_error_deg
+    ).to_region(
+        config.receive_radius_max,
+        config.near_radius,
         config.sector_arc_samples,
     )
-    arc = [
-        (
-            first_position.x + config.receive_radius_max * cos(radians(angle)),
-            first_position.y + config.receive_radius_max * sin(radians(angle)),
-        )
-        for angle in angles
-    ]
-    sector = ShapelyPolygon([(first_position.x, first_position.y), *arc])
-    region = target_disk.intersection(outer_disk).intersection(sector).difference(inner_disk)
+    region = target_disk.intersection(sector)
     if region.is_empty or region.area <= 0.0:
         raise ValueError("第一次观测与目标圆域没有非零面积的公共可行域。")
     return region
@@ -297,46 +288,37 @@ def _generate_triangular_lattice(
     return points
 
 
-def _hexagon(center_x: float, center_y: float, spacing: float) -> ShapelyPolygon:
+def _hexagon(center_x: float, center_y: float, spacing: float) -> Region:
     """返回三角晶格点的正六边形 Voronoi 单元。"""
     circumradius = spacing / sqrt(3.0)
     vertices = [
-        (
+        Point(
             center_x + circumradius * cos(radians(30.0 + 60.0 * index)),
             center_y + circumradius * sin(radians(30.0 + 60.0 * index)),
         )
         for index in range(6)
     ]
-    return ShapelyPolygon(vertices)
+    return Region.from_vertices(vertices)
 
 
-def _geometry_coordinates(geometry: BaseGeometry) -> Iterable[tuple[float, float]]:
+def _geometry_coordinates(geometry: Region) -> list[tuple[float, float]]:
     """枚举几何对象边界上的坐标，用于计算代表点覆盖误差。"""
-    if geometry.geom_type == "Polygon":
-        yield from geometry.exterior.coords
-        for ring in geometry.interiors:
-            yield from ring.coords
-    elif geometry.geom_type == "MultiPolygon":
-        for part in geometry.geoms:
-            yield from _geometry_coordinates(part)
-    elif hasattr(geometry, "coords"):
-        yield from geometry.coords
+    return geometry.boundary_coordinates()
 
 
 def _sample_target_cells(
-    first_region: BaseGeometry,
+    first_region: Region,
     config: Problem2Config,
 ) -> list[TargetCell]:
     """用裁剪六边形单元覆盖第一次连续可行域并按面积赋权。"""
-    raw: list[tuple[Point, BaseGeometry, float, float]] = []
+    raw: list[tuple[Point, Region, float, float]] = []
     for center_x, center_y in _generate_triangular_lattice(
         first_region.bounds, config.target_grid_spacing
     ):
         clipped = _hexagon(center_x, center_y, config.target_grid_spacing).intersection(first_region)
         if clipped.is_empty or clipped.area <= 1e-9:
             continue
-        representative_shape = clipped.representative_point()
-        representative = Point(float(representative_shape.x), float(representative_shape.y))
+        representative = clipped.representative_point()
         cell_radius = max(
             hypot(x - representative.x, y - representative.y)
             for x, y in _geometry_coordinates(clipped)
@@ -391,12 +373,12 @@ def _expand_receive_radius_states(
 
 
 def _candidate_bounds(
-    first_region: BaseGeometry,
+    first_region: Region,
     first_position: Point,
     basis: tuple[np.ndarray, np.ndarray],
     config: Problem2Config,
 ) -> tuple[tuple[float, float], tuple[float, float]]:
-    hull_coordinates = list(first_region.convex_hull.exterior.coords)
+    hull_coordinates = first_region.convex_hull.boundary_coordinates()
     local = [
         _global_to_local(first_position, Point(float(x), float(y)), basis)
         for x, y in hull_coordinates
@@ -423,7 +405,7 @@ def _inclusive_range(lower: float, upper: float, step: float) -> np.ndarray:
 
 
 def _generate_candidate_grid(
-    first_region: BaseGeometry,
+    first_region: Region,
     first_position: Point,
     first_bearing_deg: float,
     config: Problem2Config,
@@ -466,21 +448,21 @@ def _generate_candidate_grid(
 
 
 def _build_safe_candidate_region(
-    first_region: BaseGeometry,
+    first_region: Region,
     config: Problem2Config,
-) -> BaseGeometry:
+) -> Region:
     """近似计算保证距每个可行目标不超过最小接收半径的区域。"""
-    hull = first_region.convex_hull
-    coordinates = list(hull.exterior.coords)[:-1]
-    safe: BaseGeometry | None = None
+    coordinates = first_region.convex_hull.boundary_coordinates()[:-1]
+    safe: Region | None = None
     for x, y in coordinates:
-        disk = ShapelyPoint(x, y).buffer(
-            config.receive_radius_min, quad_segs=max(16, config.circle_quad_segs // 2)
+        disk = Region.disk(
+            Point(x, y), config.receive_radius_min,
+            max(16, config.circle_quad_segs // 2),
         )
         safe = disk if safe is None else safe.intersection(disk)
         if safe.is_empty:
-            return GeometryCollection()
-    return safe if safe is not None else GeometryCollection()
+            return Region.empty()
+    return safe if safe is not None else Region.empty()
 
 
 def _simulate_observation(
@@ -565,70 +547,13 @@ def _project_target_points(states: Sequence[StateSample]) -> tuple[list[Point], 
     return [item[0] for item in ordered], [item[1] for item in ordered]
 
 
-def _circle_from_two(first: Point, second: Point) -> EnclosingCircle:
-    center = Point((first.x + second.x) / 2.0, (first.y + second.y) / 2.0)
-    return EnclosingCircle(center, center.distance_to(first))
-
-
-def _circle_from_three(first: Point, second: Point, third: Point) -> EnclosingCircle | None:
-    determinant = 2.0 * (
-        first.x * (second.y - third.y)
-        + second.x * (third.y - first.y)
-        + third.x * (first.y - second.y)
-    )
-    if abs(determinant) <= 1e-12:
-        return None
-    first_sq = first.x * first.x + first.y * first.y
-    second_sq = second.x * second.x + second.y * second.y
-    third_sq = third.x * third.x + third.y * third.y
-    center = Point(
-        (
-            first_sq * (second.y - third.y)
-            + second_sq * (third.y - first.y)
-            + third_sq * (first.y - second.y)
-        ) / determinant,
-        (
-            first_sq * (third.x - second.x)
-            + second_sq * (first.x - third.x)
-            + third_sq * (second.x - first.x)
-        ) / determinant,
-    )
-    return EnclosingCircle(center, center.distance_to(first))
-
-
-def _circle_contains(circle: EnclosingCircle, point: Point) -> bool:
-    return circle.center.distance_to(point) <= circle.radius + max(1e-9, circle.radius * 1e-10)
-
-
 def _minimum_enclosing_circle(
     points: Sequence[Point],
     random_seed: int = 2026,
 ) -> EnclosingCircle:
-    """用固定随机顺序的增量算法求点集最小覆盖圆。"""
-    if not points:
-        raise ValueError("空点集不存在最小覆盖圆。")
-    shuffled = list(points)
-    np.random.default_rng(random_seed).shuffle(shuffled)
-    circle: EnclosingCircle | None = None
-    for i, first in enumerate(shuffled):
-        if circle is not None and _circle_contains(circle, first):
-            continue
-        circle = EnclosingCircle(first, 0.0)
-        for j, second in enumerate(shuffled[:i]):
-            if _circle_contains(circle, second):
-                continue
-            circle = _circle_from_two(first, second)
-            for third in shuffled[:j]:
-                if _circle_contains(circle, third):
-                    continue
-                circumcircle = _circle_from_three(first, second, third)
-                if circumcircle is not None:
-                    circle = circumcircle
-                else:
-                    pairs = [(first, second), (first, third), (second, third)]
-                    circle = max((_circle_from_two(*pair) for pair in pairs), key=lambda item: item.radius)
-    assert circle is not None
-    return circle
+    """兼容 P3 现有导入；实现已统一移动到 utils。"""
+    circle: Circle = minimum_enclosing_circle(points, random_seed)
+    return EnclosingCircle(circle.center, circle.radius)
 
 
 def _bearing_gradient(sensor: Point, target: Point) -> np.ndarray:
@@ -718,7 +643,7 @@ def _evaluate_candidate(
     target_cells: Sequence[TargetCell],
     states: Sequence[StateSample],
     arrays: dict[str, np.ndarray],
-    safe_region: BaseGeometry,
+    safe_region: Region,
     config: Problem2Config,
 ) -> CandidateMetrics:
     """枚举一个候选点的可观测事件并汇总后验定位指标。"""
@@ -769,8 +694,7 @@ def _evaluate_candidate(
         float(np.average(fisher_values, weights=fisher_weights))
         if fisher_values else float("-inf")
     )
-    probe = ShapelyPoint(point.x, point.y)
-    guaranteed_signal = not safe_region.is_empty and safe_region.covers(probe)
+    guaranteed_signal = not safe_region.is_empty and safe_region.covers(point)
     return CandidateMetrics(
         point=point,
         a=a,
@@ -812,7 +736,7 @@ def _evaluate_all_candidates(
     first_position: Point,
     target_cells: Sequence[TargetCell],
     states: Sequence[StateSample],
-    safe_region: BaseGeometry,
+    safe_region: Region,
     config: Problem2Config,
 ) -> list[CandidateMetrics]:
     arrays = _state_arrays(states)
@@ -827,7 +751,7 @@ def _evaluate_all_candidates(
 
 def _refine_candidate_grid(
     coarse_results: Sequence[CandidateMetrics],
-    first_region: BaseGeometry,
+    first_region: Region,
     first_position: Point,
     first_bearing_deg: float,
     config: Problem2Config,
@@ -875,7 +799,7 @@ def _find_pareto_candidates(candidates: Sequence[CandidateMetrics]) -> list[Cand
 def _extract_candidate_region(
     candidates: Sequence[CandidateMetrics],
     config: Problem2Config,
-) -> BaseGeometry:
+) -> Region:
     """把相对最优的细网格点合并成稳定候选区域。"""
     best = candidates[0]
     radius_limit = (
@@ -891,12 +815,10 @@ def _extract_candidate_region(
     if not selected:
         selected = [best]
     cell_radius = config.refined_grid_spacing / sqrt(2.0)
-    return unary_union([
-        ShapelyPoint(candidate.point.x, candidate.point.y).buffer(
-            cell_radius, quad_segs=4
-        )
+    return Region.union_all(
+        Region.disk(candidate.point, cell_radius, quad_segs=4)
         for candidate in selected
-    ])
+    )
 
 
 def solve_problem_2(
@@ -975,16 +897,13 @@ def run_convergence_check(
     return summaries
 
 
-def _plot_geometry(ax, geometry: BaseGeometry, **kwargs) -> None:
+def _plot_geometry(ax, geometry: Region, **kwargs) -> None:
     from matplotlib.patches import Polygon as PolygonPatch
 
     if geometry.is_empty:
         return
-    parts = geometry.geoms if isinstance(geometry, (MultiPolygon, GeometryCollection)) else [geometry]
-    for part in parts:
-        if part.geom_type != "Polygon":
-            continue
-        coordinates = np.asarray(part.exterior.coords)
+    for ring in geometry.exterior_rings():
+        coordinates = np.asarray(ring)
         ax.add_patch(PolygonPatch(coordinates, closed=True, **kwargs))
 
 

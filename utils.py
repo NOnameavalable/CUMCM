@@ -9,8 +9,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from math import atan2, cos, degrees, radians, sin
+from typing import Iterable, Sequence
 
 import numpy as np
+from shapely.geometry import GeometryCollection
+from shapely.geometry import Point as ShapelyPoint
+from shapely.geometry import Polygon as ShapelyPolygon
+from shapely.geometry.base import BaseGeometry
+from shapely.ops import unary_union
 
 
 _TOLERANCE = 1e-9
@@ -173,6 +179,41 @@ class DetectionSector:
         bearing = self.origin.bearing_to(point)
         relative_angle = (bearing - self.lower_ray.angle) % 360.0
         return relative_angle <= self.angle_width + _TOLERANCE
+
+    @classmethod
+    def from_measurement(
+        cls,
+        origin: Point,
+        bearing_deg: float,
+        error_deg: float = 1.0,
+    ) -> "DetectionSector":
+        if not 0.0 < error_deg < 90.0:
+            raise ValueError("示向度误差必须位于 (0°, 90°) 内。")
+        return cls(Ray(origin, bearing_deg - error_deg), Ray(origin, bearing_deg + error_deg))
+
+    def to_region(
+        self,
+        max_distance: float,
+        min_distance: float = 0.0,
+        arc_samples: int = 65,
+    ) -> "Region":
+        """Convert the bounded measurement sector to a continuous Region."""
+        if max_distance <= 0.0 or min_distance < 0.0 or min_distance >= max_distance:
+            raise ValueError("检测扇区距离范围无效。")
+        if arc_samples < 3:
+            raise ValueError("检测扇区圆弧采样数至少为 3。")
+        angles = self.lower_ray.angle + np.linspace(0.0, self.angle_width, arc_samples)
+        outer = [
+            Point(
+                self.origin.x + max_distance * cos(radians(float(angle))),
+                self.origin.y + max_distance * sin(radians(float(angle))),
+            )
+            for angle in angles
+        ]
+        geometry = Region.from_vertices([self.origin, *outer])
+        if min_distance > 0.0:
+            geometry = geometry.difference(Region.disk(self.origin, min_distance))
+        return geometry
 
 
 @dataclass
@@ -493,3 +534,235 @@ class TargetArea:
             if not any(_same_segment(edge, existing) for existing in result):
                 result.append(edge)
         return result
+
+
+# Shapely is the single backend for continuous-region topology.  The legacy
+# Segment/Polygon/TargetArea classes above remain temporarily for API
+# compatibility; new P1/P2 code uses Region instead.
+
+
+@dataclass(frozen=True)
+class GeometryTolerance:
+    coordinate: float = 1e-8
+    distance: float = 1e-7
+    angle_deg: float = 1e-10
+    area: float = 1e-8
+
+
+GEOMETRY_TOLERANCE = GeometryTolerance()
+
+
+@dataclass(frozen=True)
+class Circle:
+    center: Point
+    radius: float
+
+    def __post_init__(self) -> None:
+        if self.radius < 0.0:
+            raise ValueError("圆半径不能为负数。")
+
+    def contains(self, point: Point) -> bool:
+        return self.center.distance_to(point) <= self.radius + GEOMETRY_TOLERANCE.distance
+
+    def to_region(self, quad_segs: int = 64) -> "Region":
+        return Region.disk(self.center, self.radius, quad_segs)
+
+
+class Region:
+    """Shapely geometry wrapper exposed to the problem modules."""
+
+    __slots__ = ("_geometry",)
+
+    def __init__(self, geometry: BaseGeometry) -> None:
+        self._geometry = geometry
+
+    @classmethod
+    def empty(cls) -> "Region":
+        return cls(GeometryCollection())
+
+    @classmethod
+    def disk(cls, center: Point, radius: float, quad_segs: int = 64) -> "Region":
+        if radius < 0.0:
+            raise ValueError("圆半径不能为负数。")
+        return cls(ShapelyPoint(center.x, center.y).buffer(radius, quad_segs=quad_segs))
+
+    @classmethod
+    def from_vertices(cls, vertices: Sequence[Point]) -> "Region":
+        if len(vertices) < 3:
+            return cls.empty()
+        return cls(ShapelyPolygon([(point.x, point.y) for point in vertices]))
+
+    @classmethod
+    def from_geometry(cls, geometry: BaseGeometry) -> "Region":
+        return cls(geometry)
+
+    @classmethod
+    def union_all(cls, regions: Iterable["Region"]) -> "Region":
+        return cls(unary_union([region._geometry for region in regions]))
+
+    @property
+    def is_empty(self) -> bool:
+        return self._geometry.is_empty
+
+    @property
+    def area(self) -> float:
+        return float(self._geometry.area)
+
+    @property
+    def bounds(self) -> tuple[float, float, float, float]:
+        values = self._geometry.bounds
+        return float(values[0]), float(values[1]), float(values[2]), float(values[3])
+
+    @property
+    def convex_hull(self) -> "Region":
+        return Region(self._geometry.convex_hull)
+
+    @property
+    def vertices(self) -> list[Point]:
+        return _unique_points([Point(x, y) for x, y in self.boundary_coordinates()])
+
+    def intersection(self, *others: "Region") -> "Region":
+        geometry = self._geometry
+        for other in others:
+            geometry = geometry.intersection(other._geometry)
+        return Region(geometry)
+
+    def difference(self, other: "Region") -> "Region":
+        return Region(self._geometry.difference(other._geometry))
+
+    def union(self, *others: "Region") -> "Region":
+        return Region.union_all((self, *others))
+
+    def covers(self, value: Point | "Region") -> bool:
+        geometry = ShapelyPoint(value.x, value.y) if isinstance(value, Point) else value._geometry
+        return bool(self._geometry.covers(geometry))
+
+    def contains(self, point: Point) -> bool:
+        return self.covers(point)
+
+    def representative_point(self) -> Point:
+        point = self._geometry.representative_point()
+        return Point(float(point.x), float(point.y))
+
+    def _polygon_parts(self) -> list[BaseGeometry]:
+        if self._geometry.geom_type == "Polygon":
+            return [self._geometry]
+        if self._geometry.geom_type in ("MultiPolygon", "GeometryCollection"):
+            return [part for part in self._geometry.geoms if part.geom_type == "Polygon"]
+        return []
+
+    def boundary_coordinates(self) -> list[tuple[float, float]]:
+        coordinates: list[tuple[float, float]] = []
+        for polygon in self._polygon_parts():
+            coordinates.extend((float(x), float(y)) for x, y in polygon.exterior.coords)
+            for ring in polygon.interiors:
+                coordinates.extend((float(x), float(y)) for x, y in ring.coords)
+        if coordinates:
+            return coordinates
+        if hasattr(self._geometry, "coords"):
+            return [(float(x), float(y)) for x, y in self._geometry.coords]
+        return []
+
+    def exterior_rings(self) -> list[list[tuple[float, float]]]:
+        return [
+            [(float(x), float(y)) for x, y in polygon.exterior.coords]
+            for polygon in self._polygon_parts()
+        ]
+
+    def diameter_with_endpoints(self) -> tuple[float, Point, Point]:
+        result = region_diameter(self)
+        return result.length, result.first, result.second
+
+    def diameter(self) -> float:
+        return self.diameter_with_endpoints()[0]
+
+
+@dataclass(frozen=True)
+class RegionDiameter:
+    length: float
+    first: Point
+    second: Point
+
+
+def region_diameter(region: Region) -> RegionDiameter:
+    vertices = region.convex_hull.vertices
+    if not vertices:
+        raise ValueError("空区域不存在直径。")
+    length, first, second = max(
+        (
+            (first.distance_to(second), first, second)
+            for index, first in enumerate(vertices)
+            for second in vertices[index + 1:]
+        ),
+        key=lambda result: result[0],
+        default=(0.0, vertices[0], vertices[0]),
+    )
+    return RegionDiameter(length, first, second)
+
+
+def minimum_enclosing_circle(points: Sequence[Point], random_seed: int = 2026) -> Circle:
+    """Return the minimum enclosing circle of a non-empty point sequence."""
+    if not points:
+        raise ValueError("空点集不存在最小覆盖圆。")
+
+    def from_two(first: Point, second: Point) -> Circle:
+        center = Point((first.x + second.x) / 2.0, (first.y + second.y) / 2.0)
+        return Circle(center, center.distance_to(first))
+
+    def from_three(first: Point, second: Point, third: Point) -> Circle | None:
+        determinant = 2.0 * (
+            first.x * (second.y - third.y)
+            + second.x * (third.y - first.y)
+            + third.x * (first.y - second.y)
+        )
+        if abs(determinant) <= 1e-12:
+            return None
+        first_sq = first.x * first.x + first.y * first.y
+        second_sq = second.x * second.x + second.y * second.y
+        third_sq = third.x * third.x + third.y * third.y
+        center = Point(
+            (
+                first_sq * (second.y - third.y)
+                + second_sq * (third.y - first.y)
+                + third_sq * (first.y - second.y)
+            ) / determinant,
+            (
+                first_sq * (third.x - second.x)
+                + second_sq * (first.x - third.x)
+                + third_sq * (second.x - first.x)
+            ) / determinant,
+        )
+        return Circle(center, center.distance_to(first))
+
+    def covers(circle: Circle, point: Point) -> bool:
+        tolerance = max(GEOMETRY_TOLERANCE.distance, circle.radius * 1e-10)
+        return circle.center.distance_to(point) <= circle.radius + tolerance
+
+    shuffled = list(points)
+    np.random.default_rng(random_seed).shuffle(shuffled)
+    circle: Circle | None = None
+    for index, first in enumerate(shuffled):
+        if circle is not None and covers(circle, first):
+            continue
+        circle = Circle(first, 0.0)
+        for second_index, second in enumerate(shuffled[:index]):
+            if covers(circle, second):
+                continue
+            circle = from_two(first, second)
+            for third in shuffled[:second_index]:
+                if covers(circle, third):
+                    continue
+                circumcircle = from_three(first, second, third)
+                if circumcircle is not None:
+                    circle = circumcircle
+                else:
+                    pairs = ((first, second), (first, third), (second, third))
+                    circle = max((from_two(*pair) for pair in pairs), key=lambda item: item.radius)
+    assert circle is not None
+    return circle
+
+
+def point_key(point: Point, precision: float = 1e-6) -> tuple[int, int]:
+    if precision <= 0.0:
+        raise ValueError("坐标键精度必须为正数。")
+    return round(point.x / precision), round(point.y / precision)
