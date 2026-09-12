@@ -71,6 +71,7 @@ P3_practice_*.jsonl
 # Runtime logs and generated figures
 *.log
 *.jsonl
+P*_run_log.jsonl
 /logs/
 /p2/P2_result.png
 /P2_result.png
