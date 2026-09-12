@@ -12,6 +12,8 @@ from P3 import (
     Problem3Config,
     TaskPlanner,
     TaskType,
+    SharedCandidate,
+    optimize_shared_second_measurements,
     refresh_channel_tasks,
     select_residual_clear_point,
 )
@@ -252,6 +254,7 @@ def test_second_measure_no_signal_uses_guaranteed_fallback(monkeypatch):
         point=belief.second_measure_point,
         channel=belief.channel,
         channel_revision=belief.revision,
+        reason="共享候选点二次检测",
     )
 
     class FakeClient:
@@ -271,6 +274,7 @@ def test_second_measure_no_signal_uses_guaranteed_fallback(monkeypatch):
     assert fallback_task.task_type is TaskType.SECOND_MEASURE
     assert fallback_task.point == Point(250.0, 300.0)
     assert belief.second_measure_completed is False
+    assert belief.shared_candidates_disabled is True
 
 
 @pytest.mark.parametrize(
@@ -464,3 +468,163 @@ def test_near_creates_immediate_clear_task():
 
     assert task.task_type is TaskType.CENTER_CLEAR
     assert task.point == point
+
+
+def _shared_metric(point: Point, radius: float = 40.0):
+    return SimpleNamespace(
+        point=point,
+        guaranteed_signal=True,
+        worst_radius=radius,
+    )
+
+
+def test_shared_point_replaces_two_second_measurements_and_shortens_route(monkeypatch):
+    config = Problem3Config(
+        p2_planning_mode="bilateral_shared",
+        shared_planning_time_s=2.0,
+        shared_refinement_radius=1.0,
+        shared_refined_spacing=1.0,
+    )
+    planner = TaskPlanner(config)
+    beliefs = {}
+    shared = Point(15.0, 0.0)
+    for channel, independent in ((1, Point(10.0, 0.0)), (2, Point(20.0, 0.0))):
+        belief = ChannelBelief(channel)
+        belief.register_observation(_direction(0.0, 0.0, 0.0))
+        old_metric = _shared_metric(independent, 20.0)
+        shared_metric = _shared_metric(shared, 40.0)
+        belief.p2_result = SimpleNamespace(
+            candidates=[old_metric, shared_metric],
+            best_candidate=old_metric,
+            initial_worst_radius=100.0,
+        )
+        belief.p2_result_revision = belief.revision
+        belief.second_measure_point = independent
+        beliefs[channel] = belief
+        planner.add_task(P3.RouteTask(
+            f"second-{channel}", TaskType.SECOND_MEASURE, independent, channel,
+            channel_revision=belief.revision,
+        ))
+
+    candidate = SharedCandidate(
+        shared, {1, 2}, {1: _shared_metric(shared), 2: _shared_metric(shared)},
+        {1: 1, 2: 1},
+    )
+    monkeypatch.setattr(P3, "build_shared_candidate_pool", lambda *_args: [candidate])
+    monkeypatch.setattr(
+        P3, "evaluate_problem_2_candidate", lambda _result, point: _shared_metric(point, 200.0)
+    )
+    event = optimize_shared_second_measurements(
+        beliefs, planner, Point(0.0, 0.0), 1
+    )
+
+    second_tasks = [
+        task for task in planner.tasks.values()
+        if task.task_type is TaskType.SECOND_MEASURE
+    ]
+    assert len(second_tasks) == 2
+    assert all(task.point == shared for task in second_tasks)
+    assert event["saved_distance_m"] == pytest.approx(5.0)
+    assert set(event["assignments"]) == {1, 2}
+
+
+def test_shared_replacement_keeps_old_location_when_other_task_uses_it(monkeypatch):
+    config = Problem3Config(
+        p2_planning_mode="bilateral_shared",
+        shared_planning_time_s=2.0,
+        shared_refinement_radius=1.0,
+        shared_refined_spacing=1.0,
+    )
+    planner = TaskPlanner(config)
+    beliefs = {}
+    shared = Point(15.0, 0.0)
+    for channel, independent in ((1, Point(10.0, 0.0)), (2, Point(20.0, 0.0))):
+        belief = ChannelBelief(channel)
+        belief.register_observation(_direction(0.0, 0.0, 0.0))
+        old_metric = _shared_metric(independent, 20.0)
+        shared_metric = _shared_metric(shared, 40.0)
+        belief.p2_result = SimpleNamespace(
+            candidates=[old_metric, shared_metric], best_candidate=old_metric,
+            initial_worst_radius=100.0,
+        )
+        belief.p2_result_revision = belief.revision
+        beliefs[channel] = belief
+        planner.add_task(P3.RouteTask(
+            f"second-{channel}", TaskType.SECOND_MEASURE, independent, channel,
+            channel_revision=belief.revision,
+        ))
+    planner.add_task(P3.RouteTask(
+        "clear-at-old", TaskType.CENTER_CLEAR, Point(10.0, 0.0), 3
+    ))
+    candidate = SharedCandidate(
+        shared, {1, 2}, {1: _shared_metric(shared), 2: _shared_metric(shared)},
+        {1: 1, 2: 1},
+    )
+    monkeypatch.setattr(P3, "build_shared_candidate_pool", lambda *_args: [candidate])
+    monkeypatch.setattr(
+        P3, "evaluate_problem_2_candidate", lambda _result, point: _shared_metric(point, 200.0)
+    )
+
+    optimize_shared_second_measurements(beliefs, planner, Point(0.0, 0.0), 1)
+
+    assert planner.tasks["clear-at-old"].point == Point(10.0, 0.0)
+    assert sum(
+        task.channel == 1 and task.task_type is TaskType.SECOND_MEASURE
+        for task in planner.tasks.values()
+    ) == 1
+
+
+def test_stale_p2_cache_is_not_added_to_shared_pool():
+    config = Problem3Config()
+    planner = TaskPlanner(config)
+    belief = ChannelBelief(1)
+    belief.register_observation(_direction(0.0, 0.0, 0.0))
+    belief.p2_result = SimpleNamespace(candidates=[_shared_metric(Point(10.0, 0.0))])
+    belief.p2_result_revision = belief.revision
+    belief.register_observation(ObservationRecord(
+        Point(1.0, 0.0), "no_signal", None, 5.0
+    ))
+
+    assert P3.build_shared_candidate_pool(
+        {1: belief}, planner, Point(0.0, 0.0), 1
+    ) == []
+
+
+def test_interpolated_shared_candidate_is_rejected_by_exact_evaluation(monkeypatch):
+    config = Problem3Config(
+        shared_planning_time_s=2.0,
+        shared_refinement_radius=1.0,
+        shared_refined_spacing=1.0,
+    )
+    planner = TaskPlanner(config)
+    beliefs = {}
+    proposed = Point(15.0, 0.0)
+    for channel, independent in ((1, Point(10.0, 0.0)), (2, Point(20.0, 0.0))):
+        belief = ChannelBelief(channel)
+        belief.register_observation(_direction(0.0, 0.0, 0.0))
+        old = _shared_metric(independent, 20.0)
+        belief.p2_result = SimpleNamespace(
+            candidates=[old], best_candidate=old, initial_worst_radius=100.0
+        )
+        belief.p2_result_revision = belief.revision
+        beliefs[channel] = belief
+        planner.add_task(P3.RouteTask(
+            f"second-{channel}", TaskType.SECOND_MEASURE, independent, channel,
+            channel_revision=belief.revision,
+        ))
+    coarse = SharedCandidate(
+        proposed, {1, 2}, {1: _shared_metric(proposed), 2: _shared_metric(proposed)},
+        {1: 1, 2: 1},
+    )
+    monkeypatch.setattr(P3, "build_shared_candidate_pool", lambda *_args: [coarse])
+    monkeypatch.setattr(
+        P3, "evaluate_problem_2_candidate", lambda _result, point: _shared_metric(point, 200.0)
+    )
+
+    event = optimize_shared_second_measurements(
+        beliefs, planner, Point(0.0, 0.0), 1
+    )
+
+    assert event["assignments"] == {}
+    assert planner.tasks["second-1"].point == Point(10.0, 0.0)
+    assert planner.tasks["second-2"].point == Point(20.0, 0.0)

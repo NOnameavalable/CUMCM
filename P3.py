@@ -10,7 +10,7 @@ import argparse
 import json
 import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
@@ -19,13 +19,20 @@ import numpy as np
 from python_tsp.heuristics import solve_tsp_local_search
 
 from P1 import Problem1Geometry, solve_problem_1_geometry
-from P2 import Problem2Config, solve_problem_2
+from P2 import (
+    CandidateMetrics,
+    Problem2Config,
+    Problem2Result,
+    evaluate_problem_2_candidate,
+    solve_problem_2,
+)
 from simulator import SimulatorClient, SimulatorError
 from utils import Point, Region, point_key
 
 
 ObservationKind = Literal["direction", "near", "no_signal"]
 ActionKind = Literal["measure", "clear", "exit"]
+P2PlanningMode = Literal["legacy_single", "bilateral_independent", "bilateral_shared"]
 
 
 # 类定义
@@ -68,6 +75,12 @@ class Problem3Config:
     real_time_reserve_s: float = 10.0
     point_precision: float = 1e-6
     route_search_time_s: float = 0.1
+    p2_planning_mode: P2PlanningMode = "bilateral_shared"
+    shared_planning_time_s: float = 1.0
+    shared_grid_spacing: float = 100.0
+    shared_refined_spacing: float = 25.0
+    shared_refinement_radius: float = 100.0
+    shared_min_radius_reduction: float = 0.05
     p2: Problem2Config = field(default_factory=Problem2Config)
 
     def __post_init__(self) -> None:
@@ -94,6 +107,16 @@ class Problem3Config:
             raise ValueError("坐标去重精度必须为正数。")
         if not math.isfinite(self.route_search_time_s) or self.route_search_time_s <= 0:
             raise ValueError("路径规划时间预算必须为有限正数。")
+        if self.p2_planning_mode not in (
+            "legacy_single", "bilateral_independent", "bilateral_shared"
+        ):
+            raise ValueError("未知 P2 规划模式。")
+        if self.shared_planning_time_s <= 0 or self.shared_grid_spacing <= 0:
+            raise ValueError("共享规划预算和网格间距必须为正数。")
+        if self.shared_refined_spacing <= 0 or self.shared_refinement_radius <= 0:
+            raise ValueError("共享加密间距和半径必须为正数。")
+        if not 0.0 <= self.shared_min_radius_reduction < 1.0:
+            raise ValueError("共享点最小半径缩减比例必须位于 [0, 1)。")
 
 
 class TaskType(str, Enum):
@@ -197,6 +220,9 @@ class ChannelBelief:
     second_measure_point: Point | None = None
     second_measure_fallback_point: Point | None = None
     second_measure_completed: bool = False
+    p2_result: Problem2Result | None = field(default=None, repr=False)
+    p2_result_revision: int = -1
+    shared_candidates_disabled: bool = False
     candidate_region: Region | None = None
     p1_geometry: Problem1Geometry | None = None
     pending_center_clear_point: Point | None = None
@@ -308,6 +334,16 @@ class RouteTask:
             ``measure``、``clear`` 或 ``exit``。
         """
         return self.task_type.action_kind
+
+
+@dataclass
+class SharedCandidate:
+    """统一世界坐标中的共享二测候选位置。"""
+
+    point: Point
+    channels: set[int]
+    metrics: dict[int, CandidateMetrics]
+    revisions: dict[int, int]
 
 
 class TaskPlanner:
@@ -538,6 +574,12 @@ class Problem3Controller:
         self.wall_start_s = 0.0
         self.real_deadline_s = math.inf
         self.actions_executed = 0
+        self.measurement_actions = 0
+        self.second_measurement_actions = 0
+        self.movement_distance_m = 0.0
+        self.shared_planning_time_s = 0.0
+        self.shared_planned_distance_saved_m = 0.0
+        self.shared_assignment_events: list[dict[str, Any]] = []
 
     def _check_real_time(self) -> None:
         """检查剩余现实时间是否仍足以安全发起下一动作。
@@ -560,7 +602,14 @@ class Problem3Controller:
             RuntimeError: P1 圆心测量结果与有效接收距离约束矛盾。
         """
         assert task.point is not None and task.channel is not None
+        movement = getattr(self.client, "position", task.point).distance_to(task.point)
         response = self.client.measure(task.point, task.channel)
+        self.movement_distance_m = getattr(self, "movement_distance_m", 0.0) + movement
+        self.measurement_actions = getattr(self, "measurement_actions", 0) + 1
+        if task.task_type is TaskType.SECOND_MEASURE:
+            self.second_measurement_actions = getattr(
+                self, "second_measurement_actions", 0
+            ) + 1
         kind = response.get("measure_result")
         if kind not in ("direction", "near", "no_signal"):
             raise SimulatorError(f"未知 measure_result：{kind!r}")
@@ -575,6 +624,19 @@ class Problem3Controller:
         belief.register_observation(record)
         if task.task_type is TaskType.SECOND_MEASURE:
             fallback = belief.second_measure_fallback_point
+            if kind == "no_signal" and "共享" in task.reason:
+                belief.shared_candidates_disabled = True
+                anomaly = {
+                    "type": "shared_guaranteed_signal_miss",
+                    "channel": task.channel,
+                    "point": (task.point.x, task.point.y),
+                }
+                events = getattr(self, "shared_assignment_events", None)
+                if events is not None:
+                    events.append(anomaly)
+                recorder = getattr(self.client, "record_planning_event", None)
+                if callable(recorder):
+                    recorder(anomaly)
             if (
                 kind == "no_signal"
                 and fallback is not None
@@ -613,7 +675,9 @@ class Problem3Controller:
             RuntimeError: 保证清除失败，或多余区域清除失败且无恢复策略。
         """
         assert task.point is not None and task.channel is not None
+        movement = getattr(self.client, "position", task.point).distance_to(task.point)
         response = self.client.clear(task.point, task.channel)
+        self.movement_distance_m = getattr(self, "movement_distance_m", 0.0) + movement
         belief = self.beliefs[task.channel]
         result = response.get("clear_result")
         self.task_planner.remove_task(task.task_id)
@@ -680,6 +744,13 @@ class Problem3Controller:
             ),
             "program_runtime_s": time.monotonic() - self.wall_start_s,
             "actions_executed": self.actions_executed,
+            "measurement_actions": self.measurement_actions,
+            "second_measurement_actions": self.second_measurement_actions,
+            "movement_distance_m": self.movement_distance_m,
+            "movement_time_s": self.movement_distance_m / self.config.dog_speed,
+            "shared_planning_time_s": self.shared_planning_time_s,
+            "shared_planned_distance_saved_m": self.shared_planned_distance_saved_m,
+            "shared_assignment_events": self.shared_assignment_events,
         }
 
 
@@ -805,11 +876,17 @@ def refresh_channel_tasks(
         first = directions[0]
         assert first.bearing_deg is not None
         if belief.second_measure_point is None:
+            p2_config = replace(
+                config.p2,
+                bilateral_search=config.p2_planning_mode != "legacy_single",
+            )
             p2_result = solve_problem_2(
                 (first.position.x, first.position.y),
                 first.bearing_deg,
-                config.p2,
+                p2_config,
             )
+            belief.p2_result = p2_result
+            belief.p2_result_revision = belief.revision
             belief.second_measure_point = p2_result.best_candidate.point
             best_key = point_key(
                 belief.second_measure_point, config.point_precision
@@ -915,6 +992,332 @@ def select_residual_clear_point(
 # =============================================================================
 
 
+def _route_distance(tasks: list[RouteTask], start: Point) -> float:
+    points = [start] + [task.point for task in tasks if task.point is not None]
+    return sum(first.distance_to(second) for first, second in zip(points, points[1:]))
+
+
+def _sample_route_points(route: list[RouteTask], start: Point, spacing: float) -> list[Point]:
+    result = [start]
+    previous = start
+    for task in route:
+        if task.point is None:
+            continue
+        distance = previous.distance_to(task.point)
+        for index in range(1, int(distance // spacing) + 1):
+            ratio = min(1.0, index * spacing / distance) if distance else 1.0
+            result.append(Point(
+                previous.x + ratio * (task.point.x - previous.x),
+                previous.y + ratio * (task.point.y - previous.y),
+            ))
+        result.append(task.point)
+        previous = task.point
+    return result
+
+
+def _candidate_is_useful(
+    belief: ChannelBelief,
+    metrics: CandidateMetrics,
+    config: Problem3Config,
+) -> bool:
+    result = belief.p2_result
+    if result is None or not metrics.guaranteed_signal:
+        return False
+    limit = result.initial_worst_radius * (1.0 - config.shared_min_radius_reduction)
+    if metrics.worst_radius > limit + 1e-9:
+        return False
+    key = point_key(metrics.point, config.point_precision)
+    return all(
+        point_key(record.position, config.point_precision) != key
+        for record in belief.observations
+    )
+
+
+def build_shared_candidate_pool(
+    beliefs: dict[int, ChannelBelief],
+    planner: TaskPlanner,
+    current_position: Point,
+    current_channel: int,
+    deadline_s: float = math.inf,
+) -> list[SharedCandidate]:
+    """用统一粗网格和现有路线构造待精确复评的共享点池。"""
+    config = planner.config
+    active = {
+        channel: belief
+        for channel, belief in beliefs.items()
+        if not belief.cleared
+        and not belief.second_measure_completed
+        and not belief.shared_candidates_disabled
+        and len(belief.direction_observations) == 1
+        and belief.p2_result is not None
+        and belief.p2_result_revision == belief.revision
+    }
+    if not active:
+        return []
+
+    route = planner.plan_route(current_position, current_channel)
+    if time.monotonic() >= deadline_s:
+        return []
+    supplemental = _sample_route_points(route, current_position, config.shared_grid_spacing)
+    supplemental.extend(
+        task.point for task in planner.tasks.values() if task.point is not None
+    )
+    supplemental.extend(
+        belief.p2_result.best_candidate.point for belief in active.values()
+        if belief.p2_result is not None
+    )
+
+    all_candidates = [
+        candidate
+        for belief in active.values()
+        for candidate in belief.p2_result.candidates  # type: ignore[union-attr]
+    ]
+    if not all_candidates:
+        return []
+    spacing = config.shared_grid_spacing
+    min_x = math.floor(min(item.point.x for item in all_candidates) / spacing) * spacing
+    max_x = math.ceil(max(item.point.x for item in all_candidates) / spacing) * spacing
+    min_y = math.floor(min(item.point.y for item in all_candidates) / spacing) * spacing
+    max_y = math.ceil(max(item.point.y for item in all_candidates) / spacing) * spacing
+    grid = [
+        Point(float(x), float(y))
+        for x in np.arange(min_x, max_x + spacing * 0.5, spacing)
+        for y in np.arange(min_y, max_y + spacing * 0.5, spacing)
+    ]
+    points = grid + supplemental
+
+    channel_arrays: dict[int, tuple[np.ndarray, list[CandidateMetrics]]] = {}
+    for channel, belief in active.items():
+        candidates = belief.p2_result.candidates  # type: ignore[union-attr]
+        coordinates = np.array([(item.point.x, item.point.y) for item in candidates])
+        channel_arrays[channel] = coordinates, candidates
+
+    coarse: dict[tuple, SharedCandidate] = {}
+    max_interpolation_distance = spacing * math.sqrt(2.0) * 0.55
+    for point in points:
+        if time.monotonic() >= deadline_s:
+            break
+        metrics: dict[int, CandidateMetrics] = {}
+        for channel, belief in active.items():
+            coordinates, candidates = channel_arrays[channel]
+            squared = np.sum((coordinates - np.array([point.x, point.y])) ** 2, axis=1)
+            index = int(np.argmin(squared))
+            nearest = candidates[index]
+            if math.sqrt(float(squared[index])) <= max_interpolation_distance and _candidate_is_useful(
+                belief, nearest, config
+            ):
+                metrics[channel] = nearest
+        key = point_key(point, spacing / 2.0)
+        if metrics:
+            old = coarse.get(key)
+            if old is None or len(metrics) > len(old.channels):
+                coarse[key] = SharedCandidate(
+                    point=point,
+                    channels=set(metrics),
+                    metrics=metrics,
+                    revisions={channel: active[channel].revision for channel in metrics},
+                )
+
+    route_points = [current_position] + [task.point for task in route if task.point is not None]
+    def insertion_cost(point: Point) -> float:
+        return min(
+            first.distance_to(point) + point.distance_to(second) - first.distance_to(second)
+            for first, second in zip(route_points, route_points[1:])
+        ) if len(route_points) > 1 else current_position.distance_to(point)
+
+    grouped: list[list[SharedCandidate]] = []
+    by_channels: dict[frozenset[int], list[SharedCandidate]] = {}
+    for candidate in coarse.values():
+        by_channels.setdefault(frozenset(candidate.channels), []).append(candidate)
+    for same_channels in by_channels.values():
+        buckets: dict[tuple[int, int], list[int]] = {}
+        for index, candidate in enumerate(same_channels):
+            cell = (math.floor(candidate.point.x / spacing), math.floor(candidate.point.y / spacing))
+            buckets.setdefault(cell, []).append(index)
+        unseen = set(range(len(same_channels)))
+        while unseen:
+            stack = [unseen.pop()]
+            component: list[SharedCandidate] = []
+            while stack:
+                index = stack.pop()
+                item = same_channels[index]
+                component.append(item)
+                cell = (math.floor(item.point.x / spacing), math.floor(item.point.y / spacing))
+                for dx in (-1, 0, 1):
+                    for dy in (-1, 0, 1):
+                        for neighbor in buckets.get((cell[0] + dx, cell[1] + dy), []):
+                            if neighbor in unseen and item.point.distance_to(
+                                same_channels[neighbor].point
+                            ) <= spacing * math.sqrt(2.0) + 1e-9:
+                                unseen.remove(neighbor)
+                                stack.append(neighbor)
+            grouped.append(component)
+
+    selected: dict[tuple, SharedCandidate] = {}
+    for items in grouped:
+        choices = [
+            min(items, key=lambda item: sum(
+                metric.worst_radius / active[channel].p2_result.initial_worst_radius
+                for channel, metric in item.metrics.items()
+            )),
+            min(items, key=lambda item: item.point.distance_to(current_position)),
+            min(items, key=lambda item: insertion_cost(item.point)),
+        ]
+        for item in choices:
+            selected[point_key(item.point, config.point_precision)] = item
+    return list(selected.values())
+
+
+def optimize_shared_second_measurements(
+    beliefs: dict[int, ChannelBelief],
+    planner: TaskPlanner,
+    current_position: Point,
+    current_channel: int,
+) -> dict[str, Any]:
+    """在现实时间预算内，把独立二测任务迁入可缩短路线的共享位置。"""
+    started = time.monotonic()
+    config = planner.config
+    if config.p2_planning_mode != "bilateral_shared":
+        return {"elapsed_s": 0.0, "saved_distance_m": 0.0, "assignments": {}}
+    if not any(
+        len(belief.direction_observations) == 1
+        and not belief.second_measure_completed
+        and belief.p2_result is not None
+        and belief.p2_result_revision == belief.revision
+        and not belief.shared_candidates_disabled
+        for belief in beliefs.values()
+    ):
+        return {"elapsed_s": 0.0, "saved_distance_m": 0.0, "assignments": {}}
+
+    deadline = started + config.shared_planning_time_s
+    base_tasks = dict(planner.tasks)
+    base_route = planner.plan_route(current_position, current_channel)
+    base_keys = list(planner._route_keys)
+    base_distance = _route_distance(base_route, current_position)
+    if time.monotonic() >= deadline:
+        elapsed = time.monotonic() - started
+        return {
+            "elapsed_s": elapsed,
+            "budget_overrun_s": max(0.0, elapsed - config.shared_planning_time_s),
+            "saved_distance_m": 0.0,
+            "assignments": {},
+        }
+    pool = build_shared_candidate_pool(
+        beliefs, planner, current_position, current_channel, deadline
+    )
+    def rough_distance(item: SharedCandidate) -> float:
+        trial_route = [
+            replace(task, point=item.point)
+            if task.task_type is TaskType.SECOND_MEASURE and task.channel in item.channels
+            else task
+            for task in base_route
+        ]
+        return _route_distance(trial_route, current_position)
+    pool.sort(key=lambda item: (
+        rough_distance(item),
+        -len(item.channels),
+        current_position.distance_to(item.point),
+    ))
+    best_tasks = base_tasks
+    best_distance = base_distance
+    best_quality_delta = 0.0
+    best_assignments: dict[int, Point] = {}
+
+    offsets = [(0.0, 0.0)]
+    step = config.shared_refined_spacing
+    radius = config.shared_refinement_radius
+    for dx in np.arange(-radius, radius + step * 0.5, step):
+        for dy in np.arange(-radius, radius + step * 0.5, step):
+            if dx * dx + dy * dy <= radius * radius + 1e-9 and (dx or dy):
+                offsets.append((float(dx), float(dy)))
+
+    for coarse in pool:
+        for dx, dy in offsets:
+            if time.monotonic() - started >= config.shared_planning_time_s:
+                break
+            point = Point(coarse.point.x + dx, coarse.point.y + dy)
+            exact: dict[int, CandidateMetrics] = {}
+            for channel in coarse.channels:
+                if time.monotonic() - started >= config.shared_planning_time_s:
+                    break
+                belief = beliefs[channel]
+                result = belief.p2_result
+                if result is None or belief.p2_result_revision != belief.revision:
+                    continue
+                metric = next((
+                    item for item in result.candidates
+                    if point_key(item.point, config.point_precision)
+                    == point_key(point, config.point_precision)
+                ), None)
+                if metric is None:
+                    metric = evaluate_problem_2_candidate(result, point)
+                if _candidate_is_useful(belief, metric, config):
+                    exact[channel] = metric
+            existing_key = point_key(point, config.point_precision) in {
+                point_key(task.point, config.point_precision)
+                for task in base_tasks.values() if task.point is not None
+            }
+            if len(exact) < 2 and not (len(exact) == 1 and existing_key):
+                continue
+
+            trial = dict(base_tasks)
+            assignments: dict[int, Point] = {}
+            for task_id, task in trial.items():
+                if task.task_type is TaskType.SECOND_MEASURE and task.channel in exact:
+                    trial[task_id] = replace(task, point=point, reason="共享候选点二次检测")
+                    assignments[task.channel] = point  # type: ignore[index]
+            if not assignments:
+                continue
+            planner.tasks = trial
+            planner._route_keys = list(base_keys)
+            try:
+                trial_route = planner.plan_route(current_position, current_channel)
+            finally:
+                planner.tasks = base_tasks
+                planner._route_keys = list(base_keys)
+            distance = _route_distance(trial_route, current_position)
+            quality_delta = 0.0
+            for channel in assignments:
+                result = beliefs[channel].p2_result
+                assert result is not None
+                old_task = next(
+                    task for task in base_tasks.values()
+                    if task.task_type is TaskType.SECOND_MEASURE and task.channel == channel
+                )
+                old_metric = min(
+                    result.candidates,
+                    key=lambda item: item.point.distance_to(old_task.point),  # type: ignore[arg-type]
+                )
+                quality_delta += (
+                    exact[channel].worst_radius - old_metric.worst_radius
+                ) / result.initial_worst_radius
+            if distance < best_distance - 1e-7 or (
+                abs(distance - best_distance) <= 1e-7
+                and quality_delta < best_quality_delta - 1e-12
+            ):
+                best_tasks = trial
+                best_distance = distance
+                best_quality_delta = quality_delta
+                best_assignments = assignments
+        if time.monotonic() - started >= config.shared_planning_time_s:
+            break
+
+    planner.tasks = best_tasks
+    planner._route_keys = list(base_keys)
+    planner.plan_route(current_position, current_channel)
+    for channel, point in best_assignments.items():
+        beliefs[channel].second_measure_point = point
+    elapsed = time.monotonic() - started
+    return {
+        "elapsed_s": elapsed,
+        "budget_overrun_s": max(0.0, elapsed - config.shared_planning_time_s),
+        "saved_distance_m": max(0.0, base_distance - best_distance),
+        "assignments": {
+            channel: (point.x, point.y) for channel, point in best_assignments.items()
+        },
+    }
+
+
 # =============================================================================
 # 5. 模拟器运行与流程控制算法
 # =============================================================================
@@ -944,6 +1347,35 @@ def run_controller(controller: Problem3Controller) -> dict[str, Any]:
         controller.task_planner.discard_stale_tasks(controller.beliefs)
         if not controller.task_planner.tasks:
             raise RuntimeError("任务池为空，但尚未满足退出条件。")
+        current_key = point_key(
+            controller.client.position, controller.config.point_precision
+        )
+        has_local_task = any(
+            task.point is not None
+            and task.action_kind != "exit"
+            and point_key(task.point, controller.config.point_precision) == current_key
+            for task in controller.task_planner.tasks.values()
+        )
+        if (
+            not has_local_task
+            and controller.config.p2_planning_mode == "bilateral_shared"
+            and time.monotonic() + controller.config.shared_planning_time_s
+            < controller.real_deadline_s - controller.config.real_time_reserve_s
+        ):
+            event = optimize_shared_second_measurements(
+                controller.beliefs,
+                controller.task_planner,
+                controller.client.position,
+                controller.client.current_channel,
+            )
+            controller.shared_planning_time_s += event["elapsed_s"]
+            controller.shared_planned_distance_saved_m += event["saved_distance_m"]
+            if event["assignments"]:
+                controller.shared_assignment_events.append(event)
+                recorder = getattr(controller.client, "record_planning_event", None)
+                if callable(recorder):
+                    recorder(event)
+            controller._check_real_time()
         task = controller.task_planner.choose_next(
             controller.client.position,
             controller.client.current_channel,
@@ -974,6 +1406,7 @@ def run_offline_check(config: Problem3Config) -> dict[str, Any]:
         "class_structure_ready": True,
         "algorithms_migrated": True,
         "route_planner": "python-tsp two_opt (open route, movement objective)",
+        "p2_planning_mode": config.p2_planning_mode,
     }
 
 
@@ -985,9 +1418,21 @@ def main() -> None:
     parser.add_argument("--log", type=Path, default=Path("P3_run_log.jsonl"))
     parser.add_argument("--route-search-time", type=float, default=0.1,
                         help="每轮TSP搜索预算（秒，默认0.1）")
+    parser.add_argument(
+        "--p2-planning-mode",
+        choices=("legacy_single", "bilateral_independent", "bilateral_shared"),
+        default="bilateral_shared",
+        help="P2对照模式（默认双边共享规划）",
+    )
+    parser.add_argument("--shared-planning-time", type=float, default=1.0,
+                        help="每轮共享二测规划预算（秒，默认1.0）")
     args = parser.parse_args()
 
-    config = Problem3Config(route_search_time_s=args.route_search_time)
+    config = Problem3Config(
+        route_search_time_s=args.route_search_time,
+        p2_planning_mode=args.p2_planning_mode,
+        shared_planning_time_s=args.shared_planning_time,
+    )
     if not args.run:
         print(json.dumps(run_offline_check(config), ensure_ascii=False, indent=2))
         return

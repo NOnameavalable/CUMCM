@@ -58,6 +58,7 @@ class Problem2Config:
     candidate_lateral_extent: float = 1000.0
     candidate_a_bounds: tuple[float, float] | None = None
     candidate_b_bounds: tuple[float, float] | None = None
+    bilateral_search: bool = True
 
     receive_radius_sample_count: int = 5
     error_samples_deg: tuple[float, ...] = (-1.0, 0.0, 1.0)
@@ -196,6 +197,7 @@ class Problem2Result:
     best_candidate: CandidateMetrics
     pareto_candidates: list[CandidateMetrics]
     recommended_region: Region
+    initial_worst_radius: float = float("inf")
 
 
 def _validate_inputs(first_position: Sequence[float], first_bearing_deg: float) -> Point:
@@ -389,9 +391,13 @@ def _candidate_bounds(
         min(0.0, min(a_values)) - config.candidate_margin,
         max(0.0, max(a_values)) + config.candidate_margin,
     )
+    lateral_bound = max(
+        max(abs(value) for value in b_values) + config.candidate_margin,
+        config.candidate_lateral_extent,
+    )
     b_bounds = config.candidate_b_bounds or (
-        0.0,
-        max(max(b_values) + config.candidate_margin, config.candidate_lateral_extent),
+        -lateral_bound if config.bilateral_search else 0.0,
+        lateral_bound,
     )
     return a_bounds, b_bounds
 
@@ -412,7 +418,7 @@ def _generate_candidate_grid(
     spacing: float | None = None,
     windows: Sequence[tuple[float, float, float]] | None = None,
 ) -> list[tuple[Point, float, float]]:
-    """在局部坐标中生成全域粗网格或若干局部细网格（仅在单侧 b >= 0 采样）。"""
+    """在局部坐标中生成全域粗网格或若干局部细网格。"""
     basis = _make_local_basis(first_bearing_deg)
     step = spacing or config.candidate_grid_spacing
     if windows is None:
@@ -437,8 +443,8 @@ def _generate_candidate_grid(
             a_bounds, b_bounds = explicit_bounds
         for a in _inclusive_range(*a_bounds, step):
             for b in _inclusive_range(*b_bounds, step):
-                if b < -1e-9:
-                    continue  # 利用示向对称性，仅在同一侧 (b >= 0) 进行采样
+                if not config.bilateral_search and config.candidate_b_bounds is None and b < -1e-9:
+                    continue
                 point = _local_to_global(first_position, float(a), float(b), basis)
                 if point.distance_to(first_position) <= 1e-9:
                     continue  # 同一位置重复检测的误差不会改变。
@@ -857,6 +863,12 @@ def solve_problem_2(
     )
     pareto = _find_pareto_candidates(candidates)
     recommended_region = _extract_candidate_region(candidates, active_config)
+    prior_circle = _minimum_enclosing_circle(
+        [cell.representative for cell in cells], active_config.random_seed
+    )
+    initial_worst_radius = prior_circle.radius + max(
+        (cell.cell_radius for cell in cells), default=0.0
+    )
     return Problem2Result(
         config=active_config,
         first_position=first,
@@ -869,6 +881,31 @@ def solve_problem_2(
         best_candidate=candidates[0],
         pareto_candidates=pareto,
         recommended_region=recommended_region,
+        initial_worst_radius=initial_worst_radius,
+    )
+
+
+def evaluate_problem_2_candidate(
+    result: Problem2Result,
+    point: Point | Sequence[float],
+) -> CandidateMetrics:
+    """复用已求得的 P2 状态，对任意全局坐标执行完整后验评价。"""
+    candidate = point if isinstance(point, Point) else Point(float(point[0]), float(point[1]))
+    a, b = _global_to_local(
+        result.first_position,
+        candidate,
+        _make_local_basis(result.first_bearing_deg),
+    )
+    return _evaluate_candidate(
+        candidate,
+        a,
+        b,
+        result.first_position,
+        result.target_cells,
+        result.states,
+        _state_arrays(result.states),
+        result.safe_candidate_region,
+        result.config,
     )
 
 

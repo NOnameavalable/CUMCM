@@ -79,6 +79,19 @@ class SimulatorClient:
             with self.log_path.open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps(record, ensure_ascii=False) + "\n")
 
+    def record_planning_event(self, event: dict[str, Any]) -> None:
+        """把不调用 HTTP 的本地规划事件写入同一 JSONL 日志。"""
+        record = {
+            "path": "/local/shared-planner",
+            "event": event,
+            "wall_time_s": time.time(),
+        }
+        self.records.append(record)
+        if self.log_path is not None:
+            self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            with self.log_path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(record, ensure_ascii=False) + "\n")
+
     def _post(self, path: str, payload: dict[str, Any]) -> dict[str, Any]:
         body = json.dumps(
             payload, ensure_ascii=False, separators=(",", ":")
