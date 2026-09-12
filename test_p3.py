@@ -1,5 +1,7 @@
 from types import SimpleNamespace
 
+import math
+
 import pytest
 
 import P3
@@ -14,6 +16,163 @@ from P3 import (
     select_residual_clear_point,
 )
 from utils import Point, Region
+
+
+def test_coverage_centers_use_hexagon_edges_as_chords():
+    config = Problem3Config()
+    points = P3.generate_coverage_points(config)
+    assert len(points) == 7
+    assert points[0] == Point(0, 0)
+    rho = 1800 * math.cos(math.pi / 6) - math.sqrt(1000**2 - 900**2)
+    for index, center in enumerate(points[1:]):
+        angle = index * math.pi / 3
+        assert center.distance_to(points[0]) == pytest.approx(rho)
+        for delta in (-math.pi / 6, math.pi / 6):
+            endpoint = Point(1800 * math.cos(angle + delta),
+                             1800 * math.sin(angle + delta))
+            assert center.distance_to(endpoint) == pytest.approx(1000)
+
+
+def test_new_seven_disks_cover_target_region():
+    config = Problem3Config()
+    points = P3.generate_coverage_points(config)
+    # Include the central disk seam, outer boundary and hexagon vertices.
+    for radius in (0, 999, 1000, 1001, 1100, 1300, 1500, 1700, 1800):
+        for step in range(720):
+            angle = step * math.pi / 360
+            target = Point(radius * math.cos(angle), radius * math.sin(angle))
+            assert min(target.distance_to(center) for center in points) <= 1000 + 1e-8
+
+
+def test_chord_coverage_radius_limits():
+    with pytest.raises(ValueError, match="无法"):
+        P3.generate_coverage_points(Problem3Config(receive_radius_min=899))
+    assert P3.generate_coverage_points(Problem3Config(
+        target_radius=1000, receive_radius_min=1000)) == [Point(0, 0)]
+
+
+def _route_task(name, x, channel=3, kind=TaskType.FOLLOW_UP_MEASURE):
+    return P3.RouteTask(name, kind, Point(x, 0), channel)
+
+
+def test_open_tsp_can_choose_farther_first_for_shorter_complete_route():
+    planner = TaskPlanner(Problem3Config())
+    for name, x in [("near", 1), ("left", -2), ("right", 3)]:
+        planner.add_task(_route_task(name, x))
+    route = planner.plan_route(Point(0, 0), 3)
+    assert [task.task_id for task in route] == ["left", "near", "right"]
+    # Open path is 7m; choosing nearest first needs 8m. No return leg.
+    points = [Point(0, 0)] + [task.point for task in route]
+    assert sum(a.distance_to(b) for a, b in zip(points, points[1:])) == 7
+
+
+def test_same_position_clear_preserves_current_measurement_channel():
+    planner = TaskPlanner(Problem3Config())
+    planner.add_task(_route_task("clear8", 0, 8, TaskType.CENTER_CLEAR))
+    planner.add_task(_route_task("measure2", 0, 2))
+    planner.add_task(_route_task("measure3", 0, 3))
+    route = planner.plan_route(Point(0, 0), 3)
+    assert [task.task_id for task in route] == ["clear8", "measure3", "measure2"]
+
+
+def test_tsp_replans_after_task_removal_and_addition():
+    planner = TaskPlanner(Problem3Config())
+    for name, x in [("near", 1), ("left", -2), ("right", 3)]:
+        planner.add_task(_route_task(name, x))
+    assert planner.choose_next(Point(0, 0), 3).task_id == "left"
+    planner.remove_task("left")
+    planner.remove_task("right")
+    planner.add_task(_route_task("new", -3))
+    route = planner.plan_route(Point(-2, 0), 3)
+    assert [task.task_id for task in route] == ["new", "near"]
+
+
+def test_initial_140_tasks_keep_all_channels_and_start_at_origin():
+    config = Problem3Config()
+    planner = TaskPlanner(config)
+    for channel in range(1, 21):
+        refresh_channel_tasks(ChannelBelief(channel), planner, config)
+    route = planner.plan_route(Point(0, 0), 1)
+    assert len(route) == len({task.task_id for task in route}) == 140
+    assert all(task.point == Point(0, 0) for task in route[:20])
+    assert route[0].channel == 1
+    # One contiguous batch per location, although execution still takes one task.
+    positions = [task.point for task in route]
+    assert sum(a != b for a, b in zip(positions, positions[1:])) == 6
+
+
+def test_exit_does_not_compete_with_tsp_tasks():
+    planner = TaskPlanner(Problem3Config())
+    planner.add_task(P3.RouteTask("exit", TaskType.EXIT, None, None))
+    planner.add_task(_route_task("measure", 5))
+    assert planner.choose_next(Point(0, 0), 3).task_id == "measure"
+    planner.remove_task("measure")
+    assert planner.choose_next(Point(0, 0), 3).task_type is TaskType.EXIT
+
+
+class BatchClient:
+    def __init__(self, near=False):
+        self.position = Point(0, 0)
+        self.current_channel = 1
+        self.virtual_time_s = 0.0
+        self.actions = []
+        self.near = near
+
+    def enter(self):
+        return {"remaining_real_duration_s": 1200}
+
+    def measure(self, point, channel):
+        self.position = point
+        self.current_channel = channel
+        self.virtual_time_s += 5
+        self.actions.append(("measure", point, channel))
+        return {"measure_result": "near" if self.near else "no_signal",
+                "virtual_time_s": self.virtual_time_s}
+
+    def clear(self, point, channel):
+        self.position = point
+        self.actions.append(("clear", point, channel))
+        self.virtual_time_s += 5
+        return {"clear_result": "success", "virtual_time_s": self.virtual_time_s}
+
+    def exit(self):
+        return {"exit_reason": "user_exit"}
+
+
+def test_coverage_batches_only_plan_when_leaving_a_position(monkeypatch):
+    client = BatchClient()
+    controller = P3.Problem3Controller(client)
+    calls = []
+    original = controller.task_planner.plan_route
+
+    def counted(position, channel):
+        calls.append(position)
+        return original(position, channel)
+
+    monkeypatch.setattr(controller.task_planner, "plan_route", counted)
+    result = controller.run()
+    assert result["actions_executed"] == 140
+    # Origin needs no travel planning; only the six departures invoke TSP.
+    assert len(calls) == 6
+    for start in range(0, 140, 20):
+        batch = client.actions[start:start + 20]
+        assert len({(point.x, point.y) for _, point, _ in batch}) == 1
+        assert {channel for _, _, channel in batch} == set(range(1, 21))
+
+
+def test_batch_inserts_near_clear_and_checks_exit_before_next_channel(monkeypatch):
+    client = BatchClient(near=True)
+    controller = P3.Problem3Controller(client, Problem3Config(source_count_max=1))
+
+    def unexpected_plan(*args):
+        pytest.fail("原点批次不应调用TSP")
+
+    monkeypatch.setattr(controller.task_planner, "plan_route", unexpected_plan)
+    result = controller.run()
+    assert [(kind, channel) for kind, _, channel in client.actions] == [
+        ("measure", 1), ("clear", 1)]
+    assert result["cleared_count"] == 1
+    assert not any(task.channel == 1 for task in controller.task_planner.tasks.values())
 
 
 def _direction(x: float, y: float, bearing: float) -> ObservationRecord:

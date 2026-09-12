@@ -15,6 +15,9 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Literal
 
+import numpy as np
+from python_tsp.heuristics import solve_tsp_local_search
+
 from P1 import Problem1Geometry, solve_problem_1_geometry
 from P2 import Problem2Config, solve_problem_2
 from simulator import SimulatorClient, SimulatorError
@@ -64,6 +67,7 @@ class Problem3Config:
     request_retries: int = 3
     real_time_reserve_s: float = 10.0
     point_precision: float = 1e-6
+    route_search_time_s: float = 0.1
     p2: Problem2Config = field(default_factory=Problem2Config)
 
     def __post_init__(self) -> None:
@@ -88,6 +92,8 @@ class Problem3Config:
             raise ValueError("动作上限和重试次数至少为 1。")
         if self.point_precision <= 0.0:
             raise ValueError("坐标去重精度必须为正数。")
+        if not math.isfinite(self.route_search_time_s) or self.route_search_time_s <= 0:
+            raise ValueError("路径规划时间预算必须为有限正数。")
 
 
 class TaskType(str, Enum):
@@ -305,7 +311,10 @@ class RouteTask:
 
 
 class TaskPlanner:
-    """维护动态任务池并使用实时贪心代价选择下一访问任务。
+    """维护动态任务池，用 python-tsp 优化开放路线并滚动执行第一项。
+
+    TSP 优化位置间的移动时间。同位置先清除，再优先检测当前频道；
+    清除不改变测向机频道。频道切换不伪装成普通的两点距离。
 
     Attributes:
         config: 问题 3 的统一配置。
@@ -324,6 +333,7 @@ class TaskPlanner:
         self.coverage_points = generate_coverage_points(config)
         self.tasks: dict[str, RouteTask] = {}
         self._sequence = 0
+        self._route_keys: list[tuple] = []
 
     def next_task_id(self, channel: int | None, task_type: TaskType) -> str:
         """生成一个带频道、任务类型和递增序号的唯一任务 ID。
@@ -401,71 +411,97 @@ class TaskPlanner:
             )
         }
 
-    def task_cost(
+    def plan_route(
         self,
-        task: RouteTask,
         current_position: Point,
         current_channel: int,
-    ) -> float:
-        """计算一个任务相对机器狗当前状态的贪心访问代价。
+    ) -> list[RouteTask]:
+        """规划全部当前有效任务，返回开放路线，不提前推进频道状态。
 
-        代价只包含移动时间和测量任务可能产生的频道切换时间。``/clear``
-        不改变测向机频道，因此清除任务不计频道切换。
-
-        Args:
-            task: 需要评价的候选任务。
-            current_position: 机器狗当前全局坐标。
-            current_channel: 测向机当前频道。
-
-        Returns:
-            预计移动时间与频道切换时间之和；退出任务返回正无穷。
-
-        Raises:
-            AssertionError: 非退出任务缺少位置或频道。
+        同坐标任务合并为一个位置。节点0固定为当前位置，矩阵第0列
+        置零，免除回程费用。以上轮仍有效的位置顺序热启动2-opt，
+        并尝试反向初始顺序；两次搜索共享预算。结果是近似解。
+        在当前位置的任务先执行，远处任务每次反馈后重新规划。
         """
-        if task.action_kind == "exit":
-            return math.inf
-        assert task.point is not None and task.channel is not None
-        travel_time = current_position.distance_to(task.point) / self.config.dog_speed
-        switch_time = (
-            self.config.switch_time
-            if task.task_type.is_measurement and task.channel != current_channel
-            else 0.0
-        )
-        return travel_time + switch_time
+        if not self.tasks:
+            raise RuntimeError("任务池为空，无法选择下一任务。")
+        non_exit = [task for task in self.tasks.values() if task.action_kind != "exit"]
+        if not non_exit:
+            self._route_keys = []
+            return sorted(self.tasks.values(), key=lambda task: task.task_id)
+
+        groups: dict[tuple, list[RouteTask]] = {}
+        for task in non_exit:
+            assert task.point is not None and task.channel is not None
+            key = point_key(task.point, self.config.point_precision)
+            groups.setdefault(key, []).append(task)
+        current_key = point_key(current_position, self.config.point_precision)
+        remote = set(groups) - {current_key}
+        keys = [key for key in self._route_keys if key in remote]
+        keys.extend(sorted(remote - set(keys)))
+
+        if len(keys) > 1:
+            points = [current_position] + [groups[key][0].point for key in keys]
+            coords = np.array([(point.x, point.y) for point in points])
+            matrix = np.linalg.norm(coords[:, None] - coords[None, :], axis=2)
+            matrix /= self.config.dog_speed
+            matrix[:, 0] = 0.0
+            initial = list(range(len(points)))
+            best_order = initial
+            best_cost = float(matrix[initial, initial[1:] + [0]].sum())
+            for seed in (initial, [0] + initial[:0:-1]):
+                order, cost = solve_tsp_local_search(
+                    matrix,
+                    x0=seed,
+                    perturbation_scheme="two_opt",
+                    max_processing_time=self.config.route_search_time_s / 2.0,
+                )
+                if cost < best_cost:
+                    best_order, best_cost = order, cost
+            keys = [keys[index - 1] for index in best_order[1:]]
+
+        self._route_keys = keys
+        visit_keys = ([current_key] if current_key in groups else []) + keys
+        route = []
+        for key in visit_keys:
+            tasks = sorted(groups[key], key=lambda task: (
+                task.task_type.is_measurement,
+                task.channel != current_channel,
+                task.channel,
+                task.task_id,
+            ))
+            route.extend(tasks)
+            for task in tasks:
+                if task.task_type.is_measurement:
+                    current_channel = task.channel
+        return route
 
     def choose_next(
         self,
         current_position: Point,
         current_channel: int,
     ) -> RouteTask:
-        """从任务池中选择当前贪心代价最小的下一任务。
+        """持续处理当前点的访问批次，批次耗尽后才调用TSP。
 
-        只要存在实际动作，退出任务不会参与竞争。代价相同时依次按频道编号和
-        任务 ID 排序，使结果稳定且可以复现。
-
-        Args:
-            current_position: 机器狗当前全局坐标。
-            current_channel: 测向机当前频道。
-
-        Returns:
-            下一项应执行的任务。
-
-        Raises:
-            RuntimeError: 当前任务池为空。
+        每次从最新任务池提取原地任务，不缓存任务对象，保证反馈产生的
+        原地清除立即加入、被取消的任务不会继续执行。调用方在每个动作
+        前负责清理失效任务和检查时间、退出条件。
         """
-        if not self.tasks:
-            raise RuntimeError("任务池为空，无法选择下一任务。")
-        non_exit = [task for task in self.tasks.values() if task.action_kind != "exit"]
-        candidates = non_exit or list(self.tasks.values())
-        return min(
-            candidates,
-            key=lambda task: (
-                self.task_cost(task, current_position, current_channel),
-                task.channel if task.channel is not None else self.config.channel_count + 1,
+        current_key = point_key(current_position, self.config.point_precision)
+        local_tasks = [
+            task for task in self.tasks.values()
+            if task.point is not None
+            and task.action_kind != "exit"
+            and point_key(task.point, self.config.point_precision) == current_key
+        ]
+        if local_tasks:
+            return min(local_tasks, key=lambda task: (
+                task.task_type.is_measurement,
+                task.channel != current_channel,
+                task.channel,
                 task.task_id,
-            ),
-        )
+            ))
+        return self.plan_route(current_position, current_channel)[0]
 
 
 class Problem3Controller:
@@ -653,8 +689,20 @@ class Problem3Controller:
 
 
 def generate_coverage_points(config: Problem3Config) -> list[Point]:
-    """生成原点和正六边形顶点构成的七个覆盖点。"""
-    rho = config.target_radius * math.cos(math.pi / 6.0)
+    """生成原点及以内接正六边形各边为弦的检测圆内侧圆心。
+
+    检测圆使用最小接收半径，沿原边中点方向向内偏移。
+    r >= R/2 才能以边长 R 为弦；r >= R 时原点已能覆盖整个
+    目标圆域，直接返回原点，避免产生负径向坐标。
+    """
+    radius = config.target_radius
+    receive_radius = config.receive_radius_min
+    if receive_radius < radius / 2.0:
+        raise ValueError("最小接收半径不足，无法以内接正六边形边为弦。")
+    if receive_radius >= radius:
+        return [Point(0.0, 0.0)]
+    offset = math.sqrt(receive_radius ** 2 - (radius / 2.0) ** 2)
+    rho = radius * math.cos(math.pi / 6.0) - offset
     return [Point(0.0, 0.0)] + [
         Point(
             rho * math.cos(index * math.pi / 3.0),
@@ -863,7 +911,7 @@ def select_residual_clear_point(
 
 # =============================================================================
 # 4. 动态寻路辅助算法
-# 当前由 TaskPlanner.task_cost() 和 TaskPlanner.choose_next() 实现
+# 当前由 TaskPlanner.plan_route() 和 TaskPlanner.choose_next() 实现
 # =============================================================================
 
 
@@ -873,7 +921,7 @@ def select_residual_clear_point(
 
 
 def run_controller(controller: Problem3Controller) -> dict[str, Any]:
-    """执行进入、动态贪心选点、反馈更新和主动退出的完整主循环。"""
+    """执行进入、滚动TSP规划、反馈更新和主动退出的完整主循环。"""
     controller.wall_start_s = time.monotonic()
     enter_response = controller.client.enter()
     remaining = float(enter_response["remaining_real_duration_s"])
@@ -925,6 +973,7 @@ def run_offline_check(config: Problem3Config) -> dict[str, Any]:
         "coverage_points": [(round(point.x, 3), round(point.y, 3)) for point in points],
         "class_structure_ready": True,
         "algorithms_migrated": True,
+        "route_planner": "python-tsp two_opt (open route, movement objective)",
     }
 
 
@@ -934,9 +983,11 @@ def main() -> None:
     parser.add_argument("--robot-id", help="当前登录模拟器的参赛队号")
     parser.add_argument("--base-url", default="http://127.0.0.1:2026")
     parser.add_argument("--log", type=Path, default=Path("P3_run_log.jsonl"))
+    parser.add_argument("--route-search-time", type=float, default=0.1,
+                        help="每轮TSP搜索预算（秒，默认0.1）")
     args = parser.parse_args()
 
-    config = Problem3Config()
+    config = Problem3Config(route_search_time_s=args.route_search_time)
     if not args.run:
         print(json.dumps(run_offline_check(config), ensure_ascii=False, indent=2))
         return

@@ -1,4 +1,4 @@
-name:cumcm2026-b
+name: cumcm2026-b
 channels:
   - defaults
 dependencies:
@@ -12,3 +12,5 @@ dependencies:
   - openpyxl
   - pytest
   - pip
+  - pip:
+      - python-tsp==0.5.0
