@@ -35,3 +35,54 @@ htmlcov/
 # Local Notes & Artifacts
 P2_demo.png
 P3_practice_*.jsonl
+.p2_cache/
+
+# Local workspace / agent state
+.agents/
+.codex/
+*.code-workspace
+*.ses
+*.bak
+*.tmp
+*.temp
+*~
+
+# Downloaded archives and simulator distribution
+*.zip
+*.7z
+*.rar
+*.tar
+*.tar.gz
+*.tgz
+/Jammers-simulator-win64/
+
+# Problem statements, attachments and homework (not algorithm source folders)
+/CUMCM25/
+/CUMCM26/
+/CUMCM2025Problems/
+/CUMCM2026Problems/
+/2025_CUMCM_Problem_A/
+/先读下载说明.pdf
+**/作业*/
+**/作业*.*
+**/homework*/
+**/Homework*/
+
+# Runtime logs and generated figures
+*.log
+*.jsonl
+/logs/
+/p2/P2_result.png
+/P2_result.png
+**/P2_demo.png
+/coverage_verification.png
+
+# Additional Python tooling outputs
+.ruff_cache/
+.hypothesis/
+.tox/
+.nox/
+build/
+dist/
+*.egg-info/
+coverage.xml

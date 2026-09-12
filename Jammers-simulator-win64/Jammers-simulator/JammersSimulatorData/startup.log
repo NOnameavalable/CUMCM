@@ -1,2 +1,0 @@
-2026/09/11 20:48:49.593753 simulator startup begin
-2026/09/11 20:48:54.857159 simulator fatal error: open upload queue: configure upload queue database: database is locked (5) (SQLITE_BUSY)

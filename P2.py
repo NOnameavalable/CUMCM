@@ -51,9 +51,9 @@ class Problem2Config:
     # 20 m 邻点间距对应完整三角晶格约 11.55 m 的最大覆盖距离。
     target_grid_spacing: float = 20.0
     candidate_grid_spacing: float = 100.0
-    refined_grid_spacing: float = 25.0
+    refined_grid_spacing: float = 50
     refinement_radius: float = 160.0
-    refinement_seed_count: int = 8
+    refinement_seed_count: int = 4
     candidate_margin: float = 300.0
     candidate_lateral_extent: float = 1000.0
     candidate_a_bounds: tuple[float, float] | None = None
@@ -67,12 +67,19 @@ class Problem2Config:
     sector_arc_samples: int = 65
 
     optimization_mode: OptimizationMode = "robust"
+    signal_fraction_power: float = 1
+    signal_fraction_epsilon: float = 0.05
+    require_guaranteed_signal: bool = False
     candidate_region_relative_tolerance: float = 0.05
     candidate_region_absolute_tolerance: float = 2.0
     probability_tolerance: float = 0.02
     random_seed: int = 2026
 
     def __post_init__(self) -> None:
+        if not isfinite(self.signal_fraction_power) or self.signal_fraction_power < 0:
+            raise ValueError("signal_fraction_power 必须为非负有限数。")
+        if not isfinite(self.signal_fraction_epsilon) or not 0 < self.signal_fraction_epsilon <= 1:
+            raise ValueError("signal_fraction_epsilon 必须位于 (0, 1]。")
         positive = {
             "target_radius": self.target_radius,
             "receive_radius_min": self.receive_radius_min,
@@ -180,6 +187,7 @@ class CandidateMetrics:
     worst_radius: float
     expected_total_time: float
     fisher_logdet: float
+    signal_fraction: float = 0.0
     pareto_optimal: bool = False
     posterior_cases: list[PosteriorMetrics] = field(default_factory=list, repr=False)
 
@@ -198,6 +206,7 @@ class Problem2Result:
     pareto_candidates: list[CandidateMetrics]
     recommended_region: Region
     initial_worst_radius: float = float("inf")
+    result_source: str = "direct_solve"
 
 
 def _validate_inputs(first_position: Sequence[float], first_bearing_deg: float) -> Point:
@@ -676,6 +685,12 @@ def _evaluate_candidate(
     if not posterior_cases:
         raise RuntimeError("候选点没有产生任何有效观测事件。")
 
+    total_event_weight = sum(events.values())
+    signal_fraction = sum(
+        event_weight
+        for (kind, _), event_weight in events.items()
+        if kind != "no_signal"
+    ) / total_event_weight
     weights = np.array([case.event_weight for case in posterior_cases])
     weights /= weights.sum()
     radii = np.array([case.conservative_radius for case in posterior_cases])
@@ -715,20 +730,30 @@ def _evaluate_candidate(
         worst_radius=float(np.max(radii)),
         expected_total_time=expected_total_time,
         fisher_logdet=fisher_logdet,
+        signal_fraction=float(np.clip(signal_fraction, 0.0, 1.0)),
         posterior_cases=posterior_cases,
     )
 
 
-def _candidate_sort_key(candidate: CandidateMetrics, mode: OptimizationMode) -> tuple[float, ...]:
-    if mode == "robust":
-        return (
-            candidate.worst_radius,
+def adjusted_worst_radius(candidate: CandidateMetrics, config: Problem2Config) -> float:
+    """接收率偏置评分；不改变原始半径、状态权重或连续接收保证。"""
+    if config.signal_fraction_power == 0:
+        return candidate.worst_radius
+    denominator = max(candidate.signal_fraction, config.signal_fraction_epsilon) ** config.signal_fraction_power
+    return candidate.worst_radius / denominator if denominator else float("inf")
+
+
+def _candidate_sort_key(candidate: CandidateMetrics, config: Problem2Config) -> tuple[float, ...]:
+    prefix = (float(not candidate.guaranteed_signal),) if config.require_guaranteed_signal else ()
+    if config.optimization_mode == "robust":
+        return prefix + (
+            adjusted_worst_radius(candidate, config),
             -candidate.clear_fraction,
             candidate.radius_q90,
             candidate.expected_radius,
             candidate.expected_total_time,
         )
-    return (
+    return prefix + (
         -candidate.clear_fraction,
         candidate.expected_radius,
         candidate.radius_q90,
@@ -752,7 +777,7 @@ def _evaluate_all_candidates(
         )
         for point, a, b in raw_candidates
     ]
-    return sorted(results, key=lambda item: _candidate_sort_key(item, config.optimization_mode))
+    return sorted(results, key=lambda item: _candidate_sort_key(item, config))
 
 
 def _refine_candidate_grid(
@@ -808,14 +833,18 @@ def _extract_candidate_region(
 ) -> Region:
     """把相对最优的细网格点合并成稳定候选区域。"""
     best = candidates[0]
+    def score(candidate: CandidateMetrics) -> float:
+        return (adjusted_worst_radius(candidate, config)
+                if config.optimization_mode == "robust" else candidate.worst_radius)
     radius_limit = (
-        best.worst_radius * (1.0 + config.candidate_region_relative_tolerance)
+        score(best) * (1.0 + config.candidate_region_relative_tolerance)
         + config.candidate_region_absolute_tolerance
     )
     selected = [
         candidate
         for candidate in candidates
-        if candidate.worst_radius <= radius_limit
+        if (not config.require_guaranteed_signal or candidate.guaranteed_signal)
+        and score(candidate) <= radius_limit
         and candidate.clear_fraction >= best.clear_fraction - config.probability_tolerance
     ]
     if not selected:
@@ -831,14 +860,19 @@ def solve_problem_2(
     first_position: Sequence[float],
     first_bearing_deg: float,
     config: Problem2Config | None = None,
+    *,
+    _first_region: Region | None = None,
 ) -> Problem2Result:
     """求第二检测点、Pareto 点集及近优候选区域。"""
     active_config = config or Problem2Config()
     first = _validate_inputs(first_position, first_bearing_deg)
-    region = _build_first_feasible_region(first, first_bearing_deg, active_config)
+    region = (_first_region if _first_region is not None else
+              _build_first_feasible_region(first, first_bearing_deg, active_config))
     cells = _sample_target_cells(region, active_config)
     states = _expand_receive_radius_states(cells, first, active_config)
     safe_region = _build_safe_candidate_region(region, active_config)
+    if active_config.require_guaranteed_signal and safe_region.is_empty:
+        raise ValueError("保证接收区域为空，无法在其内部选择第二检测点。")
 
     coarse_grid = _generate_candidate_grid(
         region, first, first_bearing_deg, active_config
@@ -859,8 +893,18 @@ def solve_problem_2(
     }
     candidates = sorted(
         combined.values(),
-        key=lambda item: _candidate_sort_key(item, active_config.optimization_mode),
+        key=lambda item: _candidate_sort_key(item, active_config),
     )
+    if active_config.require_guaranteed_signal:
+        interior_candidates = [
+            candidate for candidate in candidates
+            if candidate.guaranteed_signal
+            and safe_region.covers(Region.disk(candidate.point, 1e-6))
+        ]
+        if not interior_candidates:
+            raise ValueError("当前网格未采到保证接收区域内部点，请减小网格间距或扩大搜索边界。")
+        best_interior = interior_candidates[0]
+        candidates = [best_interior] + [candidate for candidate in candidates if candidate is not best_interior]
     pareto = _find_pareto_candidates(candidates)
     recommended_region = _extract_candidate_region(candidates, active_config)
     prior_circle = _minimum_enclosing_circle(
@@ -978,9 +1022,11 @@ def plot_problem_2_result(
 
     x = [candidate.point.x for candidate in result.candidates]
     y = [candidate.point.y for candidate in result.candidates]
-    score = [candidate.worst_radius for candidate in result.candidates]
+    weighted = result.config.optimization_mode == "robust" and result.config.signal_fraction_power > 0
+    score = [adjusted_worst_radius(candidate, result.config) if weighted else candidate.worst_radius
+             for candidate in result.candidates]
     scatter = axis.scatter(x, y, c=score, cmap="viridis_r", s=13, alpha=0.75)
-    figure.colorbar(scatter, ax=axis, label="最坏后验覆盖半径 / m")
+    figure.colorbar(scatter, ax=axis, label="接收率调整评分（非实际半径）" if weighted else "最坏后验覆盖半径 / m")
     axis.scatter(
         [result.first_position.x], [result.first_position.y], marker="s", s=70,
         color="black", label="第一次检测点"
@@ -1014,9 +1060,12 @@ def print_result_summary(result: Problem2Result) -> None:
     print(f"最优点全局坐标：({best.point.x:.3f}, {best.point.y:.3f})")
     print(f"最优点局部坐标：(a={best.a:.3f}, b={best.b:.3f})")
     print(f"最坏后验覆盖半径：{best.worst_radius:.3f} m")
+    if result.config.optimization_mode == "robust":
+        print(f"接收率调整评分：{adjusted_worst_radius(best, result.config):.3f} (α={result.config.signal_fraction_power:g})")
     print(f"离散模型下可一次清除情形比例：{best.clear_fraction:.4f}")
     print(f"是否所有离散观测情形均可一次清除：{'是' if best.guaranteed_clear else '否'}")
     print(f"预计总时间（辅助指标）：{best.expected_total_time:.3f} s")
+    print(f"离散模型下可探测样本权重：{best.signal_fraction:.4f}")
     print(f"是否位于保守保证接收区：{'是' if best.guaranteed_signal else '否'}")
 
 
@@ -1026,6 +1075,10 @@ def main() -> None:
 
     parser = argparse.ArgumentParser(description="CUMCM 2026 B题 问题2：第二检测点选择与候选区域求解")
     parser.add_argument("--demo", action="store_true", help="使用快速演示参数运行 (目标步长60m, 粗筛200m, 细筛50m, 种子4个)")
+    parser.add_argument("--signal-fraction-power", type=float, default=None,
+                        help="接收率惩罚指数；未指定时使用 Problem2Config 中的值")
+    parser.add_argument("--allow-unguaranteed-signal", action="store_true",
+                        help="关闭保证接收区域内部选点约束，用于软惩罚对照")
     parser.add_argument("--x", type=float, default=0.0, help="第一次检测点 x 坐标 (米，默认 0.0)")
     parser.add_argument("--y", type=float, default=0.0, help="第一次检测点 y 坐标 (米，默认 0.0)")
     parser.add_argument("--bearing", type=float, default=0.0, help="第一次测得的示向度 (度，默认 0.0)")
@@ -1053,6 +1106,9 @@ def main() -> None:
         print(">>> 正在进行全情景后验推断与双层网格优化（预计耗时 1~2 分钟）...")
         print(">>> 提示：如需秒级快速测试，可追加 --demo 参数\n")
 
+    config = replace(config, require_guaranteed_signal=not args.allow_unguaranteed_signal)
+    if args.signal_fraction_power is not None:
+        config = replace(config, signal_fraction_power=args.signal_fraction_power)
     result = solve_problem_2(first_pos, bearing, config)
     print_result_summary(result)
     plot_problem_2_result(result, out_path)

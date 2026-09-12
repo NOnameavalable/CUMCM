@@ -218,7 +218,7 @@ def test_first_direction_uses_p2_and_adds_second_measure(monkeypatch):
 
     monkeypatch.setattr(
         P3,
-        "solve_problem_2",
+        "get_problem_2_result",
         lambda *_args, **_kwargs: SimpleNamespace(
             best_candidate=SimpleNamespace(point=second),
             candidates=[

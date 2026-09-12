@@ -24,8 +24,8 @@ from P2 import (
     Problem2Config,
     Problem2Result,
     evaluate_problem_2_candidate,
-    solve_problem_2,
 )
+from P2_cache import get_problem_2_result
 from simulator import SimulatorClient, SimulatorError
 from utils import Point, Region, point_key
 
@@ -659,6 +659,16 @@ class Problem3Controller:
                 belief.center_clear_allows_residual = True
         self.task_planner.remove_task(task.task_id)
         refresh_channel_tasks(belief, self.task_planner, self.config)
+        if belief.p2_result is not None and belief.p2_result_revision == belief.revision:
+            recorder = getattr(self.client, "record_planning_event", None)
+            if callable(recorder):
+                recorder({
+                    "type": "p2_result",
+                    "channel": belief.channel,
+                    "source": belief.p2_result.result_source,
+                    "first_position": (belief.p2_result.first_position.x, belief.p2_result.first_position.y),
+                    "bearing_deg": belief.p2_result.first_bearing_deg,
+                })
 
     def _handle_clear(self, task: RouteTask) -> None:
         """执行清除任务并处理成功或失败后的频道状态。
@@ -880,7 +890,7 @@ def refresh_channel_tasks(
                 config.p2,
                 bilateral_search=config.p2_planning_mode != "legacy_single",
             )
-            p2_result = solve_problem_2(
+            p2_result = get_problem_2_result(
                 (first.position.x, first.position.y),
                 first.bearing_deg,
                 p2_config,
@@ -1399,8 +1409,8 @@ def run_controller(controller: Problem3Controller) -> dict[str, Any]:
 # =============================================================================
 
 
-def run_offline_check(config: Problem3Config) -> dict[str, Any]:
-    points = generate_coverage_points(config)
+def run_offline_check(config: Problem3Config, coverage_generator=generate_coverage_points) -> dict[str, Any]:
+    points = coverage_generator(config)
     return {
         "coverage_points": [(round(point.x, 3), round(point.y, 3)) for point in points],
         "class_structure_ready": True,
@@ -1410,12 +1420,14 @@ def run_offline_check(config: Problem3Config) -> dict[str, Any]:
     }
 
 
-def main() -> None:
-    parser = argparse.ArgumentParser(description="CUMCM 2026 B题问题3控制算法")
+def main(*, controller_type=Problem3Controller,
+         coverage_generator=generate_coverage_points, problem_number=3) -> None:
+    """P3/P4 共用命令行入口，覆盖点策略由调用者提供。"""
+    parser = argparse.ArgumentParser(description=f"CUMCM 2026 B题问题{problem_number}控制算法")
     parser.add_argument("--run", action="store_true", help="连接模拟器并执行")
     parser.add_argument("--robot-id", help="当前登录模拟器的参赛队号")
     parser.add_argument("--base-url", default="http://127.0.0.1:2026")
-    parser.add_argument("--log", type=Path, default=Path("P3_run_log.jsonl"))
+    parser.add_argument("--log", type=Path, default=Path(f"P{problem_number}_run_log.jsonl"))
     parser.add_argument("--route-search-time", type=float, default=0.1,
                         help="每轮TSP搜索预算（秒，默认0.1）")
     parser.add_argument(
@@ -1434,7 +1446,7 @@ def main() -> None:
         shared_planning_time_s=args.shared_planning_time,
     )
     if not args.run:
-        print(json.dumps(run_offline_check(config), ensure_ascii=False, indent=2))
+        print(json.dumps(run_offline_check(config, coverage_generator), ensure_ascii=False, indent=2))
         return
     if not args.robot_id:
         parser.error("使用 --run 时必须同时提供 --robot-id。")
@@ -1446,7 +1458,7 @@ def main() -> None:
         retries=config.request_retries,
         log_path=args.log,
     )
-    print(json.dumps(Problem3Controller(client, config).run(), ensure_ascii=False, indent=2))
+    print(json.dumps(controller_type(client, config).run(), ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
