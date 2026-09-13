@@ -1,0 +1,123 @@
+{
+  "legacy_single": {
+    "exit_reason": "user_exit",
+    "cleared_count": 12,
+    "cleared_channels": [
+      1,
+      2,
+      3,
+      4,
+      7,
+      8,
+      9,
+      11,
+      12,
+      13,
+      17,
+      18
+    ],
+    "virtual_time_s": 3514.3816353213674,
+    "average_localize_clear_time_s": 292.8651362767806,
+    "program_runtime_s": 23.974851790990215,
+    "actions_executed": 109,
+    "measurement_actions": 97,
+    "second_measurement_actions": 12,
+    "movement_distance_m": 14381.908176606838,
+    "movement_time_s": 2876.3816353213674,
+    "shared_planning_time_s": 0.0,
+    "shared_planned_distance_saved_m": 0.0,
+    "shared_assignment_events": [],
+    "wall_clock_s": 23.974923849105835
+  },
+  "bilateral_independent": {
+    "exit_reason": "user_exit",
+    "cleared_count": 12,
+    "cleared_channels": [
+      1,
+      2,
+      3,
+      4,
+      7,
+      8,
+      9,
+      11,
+      12,
+      13,
+      17,
+      18
+    ],
+    "virtual_time_s": 3117.796057127122,
+    "average_localize_clear_time_s": 259.81633809392684,
+    "program_runtime_s": 24.681652708008187,
+    "actions_executed": 103,
+    "measurement_actions": 91,
+    "second_measurement_actions": 12,
+    "movement_distance_m": 12578.980285635602,
+    "movement_time_s": 2515.7960571271205,
+    "shared_planning_time_s": 0.0,
+    "shared_planned_distance_saved_m": 0.0,
+    "shared_assignment_events": [],
+    "wall_clock_s": 24.68172788619995
+  },
+  "bilateral_shared": {
+    "exit_reason": "user_exit",
+    "cleared_count": 12,
+    "cleared_channels": [
+      1,
+      2,
+      3,
+      4,
+      7,
+      8,
+      9,
+      11,
+      12,
+      13,
+      17,
+      18
+    ],
+    "virtual_time_s": 2847.9490476097385,
+    "average_localize_clear_time_s": 237.32908730081155,
+    "program_runtime_s": 55.5581231249962,
+    "actions_executed": 103,
+    "measurement_actions": 91,
+    "second_measurement_actions": 12,
+    "movement_distance_m": 11229.745238048692,
+    "movement_time_s": 2245.9490476097385,
+    "shared_planning_time_s": 31.249892248946708,
+    "shared_planned_distance_saved_m": 852.2215803543463,
+    "shared_assignment_events": [
+      {
+        "elapsed_s": 1.0104382919962518,
+        "budget_overrun_s": 0.010438291996251792,
+        "saved_distance_m": 777.9351596841134,
+        "assignments": {
+          "1": [
+            270.44935853473925,
+            947.2656483873328
+          ],
+          "17": [
+            270.44935853473925,
+            947.2656483873328
+          ]
+        }
+      },
+      {
+        "elapsed_s": 1.014828542014584,
+        "budget_overrun_s": 0.014828542014583945,
+        "saved_distance_m": 74.28642067023293,
+        "assignments": {
+          "8": [
+            658.3826491868322,
+            -689.8292428068064
+          ],
+          "18": [
+            658.3826491868322,
+            -689.8292428068064
+          ]
+        }
+      }
+    ],
+    "wall_clock_s": 55.558268785476685
+  }
+}
