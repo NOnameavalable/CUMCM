@@ -567,7 +567,7 @@ class Problem3Controller:
         self.client = client
         self.config = config or Problem3Config()
         self.beliefs = {
-            channel: ChannelBelief(channel)
+            channel: self.create_channel_belief(channel)
             for channel in range(1, self.config.channel_count + 1)
         }
         self.task_planner = TaskPlanner(self.config)
@@ -580,6 +580,93 @@ class Problem3Controller:
         self.shared_planning_time_s = 0.0
         self.shared_planned_distance_saved_m = 0.0
         self.shared_assignment_events: list[dict[str, Any]] = []
+
+    def create_channel_belief(self, channel: int) -> ChannelBelief:
+        """创建频道状态；子类可扩展状态而无需复制控制器初始化。"""
+        return ChannelBelief(channel)
+
+    def refresh_channel(self, belief: ChannelBelief) -> None:
+        """根据频道状态重建任务。"""
+        refresh_channel_tasks(belief, self.task_planner, self.config)
+
+    def process_measurement(
+        self,
+        belief: ChannelBelief,
+        task: RouteTask,
+        record: ObservationRecord,
+    ) -> None:
+        """处理P3测量后的策略状态。"""
+        if task.task_type is TaskType.SECOND_MEASURE:
+            fallback = belief.second_measure_fallback_point
+            if record.kind == "no_signal" and "共享" in task.reason:
+                belief.shared_candidates_disabled = True
+                anomaly = {
+                    "type": "shared_guaranteed_signal_miss",
+                    "channel": task.channel,
+                    "point": (task.point.x, task.point.y),
+                }
+                events = getattr(self, "shared_assignment_events", None)
+                if events is not None:
+                    events.append(anomaly)
+                recorder = getattr(self.client, "record_planning_event", None)
+                if callable(recorder):
+                    recorder(anomaly)
+            if (
+                record.kind == "no_signal"
+                and fallback is not None
+                and point_key(fallback, self.config.point_precision)
+                != point_key(task.point, self.config.point_precision)
+            ):
+                belief.second_measure_point = fallback
+                belief.second_measure_fallback_point = None
+                belief.second_measure_completed = False
+            else:
+                belief.second_measure_completed = True
+        elif task.task_type in (TaskType.CENTER_MEASURE, TaskType.FOLLOW_UP_MEASURE):
+            if record.kind == "no_signal":
+                raise RuntimeError(
+                    f"频道 {task.channel} 在 P1 候选区域直径圆圆心未收到信号，"
+                    "与有效接收距离约束矛盾。"
+                )
+            if task.task_type is TaskType.CENTER_MEASURE:
+                belief.pending_center_clear_point = task.point
+                belief.center_clear_allows_residual = True
+
+    def process_clear_failure(
+        self,
+        belief: ChannelBelief,
+        task: RouteTask,
+    ) -> None:
+        """处理P3清除失败后的残余区域。"""
+        if task.task_type is TaskType.RESIDUAL_CLEAR:
+            raise RuntimeError(
+                f"频道 {task.channel} 在多余区域直接清除失败；"
+                "当前简化策略未定义后续恢复。"
+            )
+        if not belief.center_clear_allows_residual:
+            raise RuntimeError(
+                f"频道 {task.channel} 的保证清除失败，与候选区域约束矛盾。"
+            )
+        if belief.candidate_region is None:
+            raise RuntimeError("圆心清除失败时缺少候选区域。")
+        remaining, clear_point = select_residual_clear_point(
+            belief.candidate_region,
+            task.point,
+            self.config.clear_radius,
+        )
+        belief.pending_center_clear_point = None
+        belief.center_clear_allows_residual = False
+        belief.remaining_clear_region = remaining
+        belief.remaining_clear_point = clear_point
+
+    def optimize_shared_measurements(self) -> dict[str, Any]:
+        """执行P3共享二测规划；P4可替换候选评价模型。"""
+        return optimize_shared_second_measurements(
+            self.beliefs,
+            self.task_planner,
+            self.client.position,
+            self.client.current_channel,
+        )
 
     def _check_real_time(self) -> None:
         """检查剩余现实时间是否仍足以安全发起下一动作。
@@ -622,43 +709,15 @@ class Problem3Controller:
         )
         belief = self.beliefs[task.channel]
         belief.register_observation(record)
-        if task.task_type is TaskType.SECOND_MEASURE:
-            fallback = belief.second_measure_fallback_point
-            if kind == "no_signal" and "共享" in task.reason:
-                belief.shared_candidates_disabled = True
-                anomaly = {
-                    "type": "shared_guaranteed_signal_miss",
-                    "channel": task.channel,
-                    "point": (task.point.x, task.point.y),
-                }
-                events = getattr(self, "shared_assignment_events", None)
-                if events is not None:
-                    events.append(anomaly)
-                recorder = getattr(self.client, "record_planning_event", None)
-                if callable(recorder):
-                    recorder(anomaly)
-            if (
-                kind == "no_signal"
-                and fallback is not None
-                and point_key(fallback, self.config.point_precision)
-                != point_key(task.point, self.config.point_precision)
-            ):
-                belief.second_measure_point = fallback
-                belief.second_measure_fallback_point = None
-                belief.second_measure_completed = False
-            else:
-                belief.second_measure_completed = True
-        elif task.task_type in (TaskType.CENTER_MEASURE, TaskType.FOLLOW_UP_MEASURE):
-            if kind == "no_signal":
-                raise RuntimeError(
-                    f"频道 {task.channel} 在 P1 候选区域直径圆圆心未收到信号，"
-                    "与有效接收距离约束矛盾。"
-                )
-            if task.task_type is TaskType.CENTER_MEASURE:
-                belief.pending_center_clear_point = task.point
-                belief.center_clear_allows_residual = True
+        if isinstance(self, Problem3Controller):
+            self.process_measurement(belief, task, record)
+        else:
+            Problem3Controller.process_measurement(self, belief, task, record)
         self.task_planner.remove_task(task.task_id)
-        refresh_channel_tasks(belief, self.task_planner, self.config)
+        if isinstance(self, Problem3Controller):
+            self.refresh_channel(belief)
+        else:
+            refresh_channel_tasks(belief, self.task_planner, self.config)
         if belief.p2_result is not None and belief.p2_result_revision == belief.revision:
             recorder = getattr(self.client, "record_planning_event", None)
             if callable(recorder):
@@ -697,27 +756,12 @@ class Problem3Controller:
             return
         if result == "no_target_in_range":
             belief.register_clear_failure(task.point)
-            if task.task_type is TaskType.RESIDUAL_CLEAR:
-                raise RuntimeError(
-                    f"频道 {task.channel} 在多余区域直接清除失败；"
-                    "当前简化策略未定义后续恢复。"
-                )
-            if not belief.center_clear_allows_residual:
-                raise RuntimeError(
-                    f"频道 {task.channel} 的保证清除失败，与候选区域约束矛盾。"
-                )
-            if belief.candidate_region is None:
-                raise RuntimeError("圆心清除失败时缺少候选区域。")
-            remaining, clear_point = select_residual_clear_point(
-                belief.candidate_region,
-                task.point,
-                self.config.clear_radius,
-            )
-            belief.pending_center_clear_point = None
-            belief.center_clear_allows_residual = False
-            belief.remaining_clear_region = remaining
-            belief.remaining_clear_point = clear_point
-            refresh_channel_tasks(belief, self.task_planner, self.config)
+            if isinstance(self, Problem3Controller):
+                self.process_clear_failure(belief, task)
+                self.refresh_channel(belief)
+            else:
+                Problem3Controller.process_clear_failure(self, belief, task)
+                refresh_channel_tasks(belief, self.task_planner, self.config)
             return
         raise SimulatorError(f"未知 clear_result：{result!r}")
 
@@ -1341,7 +1385,7 @@ def run_controller(controller: Problem3Controller) -> dict[str, Any]:
     controller.real_deadline_s = time.monotonic() + remaining
 
     for belief in controller.beliefs.values():
-        refresh_channel_tasks(belief, controller.task_planner, controller.config)
+        controller.refresh_channel(belief)
 
     while controller.actions_executed < controller.config.max_actions:
         controller._check_real_time()
@@ -1372,12 +1416,7 @@ def run_controller(controller: Problem3Controller) -> dict[str, Any]:
             and time.monotonic() + controller.config.shared_planning_time_s
             < controller.real_deadline_s - controller.config.real_time_reserve_s
         ):
-            event = optimize_shared_second_measurements(
-                controller.beliefs,
-                controller.task_planner,
-                controller.client.position,
-                controller.client.current_channel,
-            )
+            event = controller.optimize_shared_measurements()
             controller.shared_planning_time_s += event["elapsed_s"]
             controller.shared_planned_distance_saved_m += event["saved_distance_m"]
             if event["assignments"]:

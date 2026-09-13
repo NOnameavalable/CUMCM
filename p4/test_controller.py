@@ -1,6 +1,7 @@
 """验证第四题只替换点位，继续使用 P3 完整控制循环。"""
 import importlib.util
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -20,6 +21,7 @@ from utils import Point
 # 根目录入口 p4.py 与几何包 p4/ 同名，以文件方式加载入口。
 spec = importlib.util.spec_from_file_location("problem4_entry", Path(__file__).resolve().parents[1] / "p4.py")
 p4_entry = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = p4_entry
 spec.loader.exec_module(p4_entry)
 
 
@@ -159,5 +161,4 @@ def test_no_infinite_loop_when_center_measure_gets_no_signal():
     for t in new_tasks:
         if t.action_kind == "measure":
             assert t.point != center_pt
-
 

@@ -1,0 +1,8 @@
+Root: /home/bingy/CUMCM/paper/problem1/main.tex
+Compiler: not compiled
+Exit code: 1
+PDF: not created
+
+Attempts:
+- tectonic: skipped (No bundled or PATH Tectonic executable was found.)
+- texlive: skipped (No TeX Live or MacTeX installation detected. Run latex-doctor first.)

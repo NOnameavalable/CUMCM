@@ -1,0 +1,22 @@
+\begin{tikzpicture}[scale=.85]
+\begin{scope}[xshift=-3.2cm]
+\draw[blue!65!black,dashed,thick] (0,0) circle (1.8);
+\filldraw[fill=red!12,draw=red!65!black] (-1.44,-1.08) rectangle (1.44,1.08);
+\draw[thick] (-1.44,-1.08)--(1.44,1.08) node[midway,above left] {$C$};
+\fill (0,0) circle (1.6pt);
+\node[below left] at (-1.44,-1.08) {$A$};\node[above right] at (1.44,1.08) {$B$};
+\node at (-.8,-.3) {$D$};\node at (.8,.25) {$D/2$};
+\node at (0,-2.5) {(a) 可以覆盖};
+\end{scope}
+\begin{scope}[xshift=3.2cm]
+\draw[blue!65!black,dashed,thick] (0,0) circle (1.25);
+\filldraw[fill=red!12,draw=red!65!black] (-1.25,0)--(1.25,0)--(0,2.165)--cycle;
+\draw[thick] (-1.25,0)--(1.25,0) node[midway,below=12pt] {$D$};
+\draw[purple,dashed] (0,0)--(0,2.165);
+\fill (0,0) circle (1.6pt);\node[below] at (0,0) {$C$};
+\node[left] at (-1.25,0) {$A$};\node[right] at (1.25,0) {$B$};
+\fill[purple] (0,2.165) circle (2.5pt);\node[above,purple] at (0,2.165) {$P$};
+\node[right,font=\small] at (.1,1.55) {$\frac{\sqrt3 D}{2}>\frac D2$};
+\node at (0,-2.5) {(b) 不能覆盖};
+\end{scope}
+\end{tikzpicture}

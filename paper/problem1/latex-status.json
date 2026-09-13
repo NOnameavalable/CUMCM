@@ -1,0 +1,70 @@
+{
+  "detection": {
+    "activeBinDir": null,
+    "commands": {
+      "biber": {
+        "path": null,
+        "version": null
+      },
+      "kpsewhich": {
+        "path": null,
+        "version": null
+      },
+      "latexmk": {
+        "path": null,
+        "version": null
+      },
+      "lualatex": {
+        "path": null,
+        "version": null
+      },
+      "pdflatex": {
+        "path": null,
+        "version": null
+      },
+      "xelatex": {
+        "path": null,
+        "version": null
+      }
+    },
+    "knownTexBinDirs": [],
+    "missingRecommended": [
+      "xelatex",
+      "lualatex",
+      "biber"
+    ],
+    "missingRequired": [
+      "latexmk",
+      "pdflatex",
+      "kpsewhich"
+    ],
+    "reason": "No TeX Live or MacTeX tools were found on PATH or known TeX locations.",
+    "searchPath": "/home/bingy/.local/bin:/mnt/c/Users/bingy/.codex/tmp/arg0/codex-arg0IUpJOh:/mnt/c/Users/bingy/.codex/bin/wsl/b53f5e5f7452dd19:/mnt/c/Users/bingy/.codex/bin/wsl/1a4f6f66dd2f3710:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/games:/usr/local/games:/usr/lib/wsl/lib:/mnt/c/Program Files/Microsoft/jdk-17.0.11.9-hotspot/bin:/mnt/c/WINDOWS/system32:/mnt/c/WINDOWS:/mnt/c/WINDOWS/System32/Wbem:/mnt/c/WINDOWS/System32/WindowsPowerShell/v1.0:/mnt/c/WINDOWS/System32/OpenSSH:/mnt/c/Program Files (x86)/Windows Kits/10/Windows Performance Toolkit:/mnt/c/Program Files (x86)/ZeroTier/One:/mnt/c/Users/bingy/AppData/Local/Microsoft/WindowsApps:/mnt/c/Program Files/JetBrains/PyCharm 2026.2.1/bin:/snap/bin",
+    "status": "missing",
+    "texmfroot": null
+  },
+  "ready": false,
+  "smokeTest": {
+    "attempted": false,
+    "passed": false,
+    "reason": "Neither latexmk nor pdflatex is available."
+  },
+  "tectonic": {
+    "checked": [
+      {
+        "path": "/mnt/c/Users/bingy/.codex/plugins/cache/openai-bundled/latex/0.2.6/bin/tectonic",
+        "source": "bundled"
+      }
+    ],
+    "path": null,
+    "reason": "No bundled or PATH Tectonic executable was found.",
+    "source": null,
+    "status": "missing",
+    "version": null
+  },
+  "tectonicSmokeTest": {
+    "attempted": false,
+    "passed": false,
+    "reason": "No bundled or PATH Tectonic executable is available."
+  }
+}

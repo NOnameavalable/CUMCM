@@ -1,0 +1,169 @@
+% !TEX program = xelatex
+% OpenTikZ-style Mode A figure: multi-station bearing intersection.
+\documentclass[tikz,border=6pt]{standalone}
+\usepackage{ctex}
+\usetikzlibrary{arrows.meta,calc,positioning}
+
+% --- OpenTikZ palette (light / default, color-blind-friendly Okabe-Ito) ---
+\definecolor{otblue}{HTML}{0072B2}
+\definecolor{otorange}{HTML}{E69F00}
+\definecolor{otteal}{HTML}{009E73}
+\definecolor{otpurple}{HTML}{CC79A7}
+\definecolor{otgray}{HTML}{5A5A5A}
+
+% --- Geometry parameters: edit here, not in the drawing body. ---
+\def\coordinateScale{1.38}
+\def\targetRadius{3.6}
+\def\sectorExtent{8}
+\def\bearingError{1}
+\def\bearingOne{27.26}
+\def\bearingTwo{144.25}
+\def\bearingThree{285.95}
+\def\insetScale{9}
+\def\insetRadius{0.115}
+\def\insetDisplayRadius{1.035}
+
+\begin{document}
+\begin{tikzpicture}[
+  x=\coordinateScale cm,
+  y=\coordinateScale cm,
+  >=Stealth,
+  font=\small,
+  error boundary/.style={draw=otgray,dashed,line width=0.65pt},
+  bearing line/.style={draw=otblue,-{Stealth[length=2mm]},line width=0.85pt},
+  station point/.style={circle,fill=otteal,draw=otteal!70!otgray,
+                       line width=0.55pt,minimum size=5.2pt,inner sep=0pt},
+  neutral label/.style={text=otgray,font=\small},
+  emphasis label/.style={text=otorange,font=\small},
+]
+  % Semantic coordinates. Figure unit: 500 m.
+  \coordinate (target-center) at (0,0);
+  \coordinate (station-one) at (-3.0,-1.5);
+  \coordinate (station-two) at (2.8,-1.6);
+  \coordinate (station-three) at (-0.5,3.0);
+  \coordinate (candidate-center) at (0.3,0.2);
+  \coordinate (zoom-center) at (4.65,1.55);
+
+  % Target disk.
+  \fill[otblue!6] (target-center) circle[radius=\targetRadius];
+  \draw[otblue,line width=0.95pt]
+    (target-center) circle[radius=\targetRadius];
+  \node[neutral label,anchor=north west] (target-label)
+    at (-3.05,3.15) {目标圆域 $x^2+y^2\leq1800^2$};
+
+  % Exact intersection of the target disk and three ±1° sectors.
+  \begin{scope}
+    \clip (target-center) circle[radius=\targetRadius];
+    \clip (station-one)
+      --($(station-one)+({\bearingOne-\bearingError}:\sectorExtent)$)
+      --($(station-one)+({\bearingOne+\bearingError}:\sectorExtent)$)--cycle;
+    \clip (station-two)
+      --($(station-two)+({\bearingTwo-\bearingError}:\sectorExtent)$)
+      --($(station-two)+({\bearingTwo+\bearingError}:\sectorExtent)$)--cycle;
+    \clip (station-three)
+      --($(station-three)+({\bearingThree-\bearingError}:\sectorExtent)$)
+      --($(station-three)+({\bearingThree+\bearingError}:\sectorExtent)$)--cycle;
+    \fill[otorange!65] (-4,-4) rectangle (4,4);
+  \end{scope}
+
+  % Measurement center lines and uncertainty boundaries.
+  \begin{scope}
+    \clip (target-center) circle[radius=\targetRadius];
+    \foreach \station/\bearing in {
+      station-one/\bearingOne,
+      station-two/\bearingTwo,
+      station-three/\bearingThree
+    } {
+      \draw[error boundary]
+        (\station)--++({\bearing-\bearingError}:7.1);
+      \draw[error boundary]
+        (\station)--++({\bearing+\bearingError}:7.1);
+      \draw[bearing line]
+        (\station)--++(\bearing:4.25);
+    }
+  \end{scope}
+
+  % Stations, using stable semantic names.
+  \node[station point] (station-one-node) at (station-one) {};
+  \node[station point] (station-two-node) at (station-two) {};
+  \node[station point] (station-three-node) at (station-three) {};
+  \node[neutral label,below left=1pt and 2pt of station-one-node] {$S_1$};
+  \node[neutral label,below right=1pt and 2pt of station-two-node] {$S_2$};
+  \node[neutral label,above left=1pt and 2pt of station-three-node] {$S_3$};
+
+  % One explicit 1° annotation; the other sectors use the same error bound.
+  \draw[otorange,-{Stealth[length=1.6mm]},line width=0.65pt]
+    ($(station-one)+(\bearingOne:0.64)$)
+    arc[start angle=\bearingOne,
+        end angle={\bearingOne+\bearingError},radius=0.64];
+  \node[emphasis label,anchor=west]
+    at ($(station-one)+({\bearingOne+\bearingError}:0.88)$) {$1^\circ$};
+
+  % Callout from the true-scale intersection to a separate zoom panel.
+  \draw[otorange,line width=0.7pt,-{Stealth[length=2mm]}]
+    (candidate-center)--($(zoom-center)+(-\insetDisplayRadius,0)$);
+  \node[emphasis label,anchor=south west] (candidate-label)
+    at (0.55,0.45) {公共定位区域 $\Omega$};
+  \draw[otorange,line width=0.65pt,-{Stealth[length=1.8mm]}]
+    (candidate-label.south west)--(candidate-center);
+
+  % Manual zoom panel: coordinates enlarge, line widths remain readable.
+  \begin{scope}[shift={(zoom-center)},scale=\insetScale]
+    \clip (0,0) circle[radius=\insetRadius];
+    \fill[otgray!0] (-0.13,-0.13) rectangle (0.13,0.13);
+    \coordinate (local-station-one) at (-3.3,-1.7);
+    \coordinate (local-station-two) at (2.5,-1.8);
+    \coordinate (local-station-three) at (-0.8,2.8);
+    \begin{scope}
+      \clip (local-station-one)
+        --($(local-station-one)+({\bearingOne-\bearingError}:\sectorExtent)$)
+        --($(local-station-one)+({\bearingOne+\bearingError}:\sectorExtent)$)--cycle;
+      \clip (local-station-two)
+        --($(local-station-two)+({\bearingTwo-\bearingError}:\sectorExtent)$)
+        --($(local-station-two)+({\bearingTwo+\bearingError}:\sectorExtent)$)--cycle;
+      \clip (local-station-three)
+        --($(local-station-three)+({\bearingThree-\bearingError}:\sectorExtent)$)
+        --($(local-station-three)+({\bearingThree+\bearingError}:\sectorExtent)$)--cycle;
+      \fill[otorange!65] (-0.13,-0.13) rectangle (0.13,0.13);
+    \end{scope}
+    \foreach \station/\bearing in {
+      local-station-one/\bearingOne,
+      local-station-two/\bearingTwo,
+      local-station-three/\bearingThree
+    } {
+      \draw[error boundary]
+        (\station)--++({\bearing-\bearingError}:\sectorExtent);
+      \draw[error boundary]
+        (\station)--++({\bearing+\bearingError}:\sectorExtent);
+    }
+  \end{scope}
+  \draw[otorange,line width=0.85pt]
+    (zoom-center) circle[radius=\insetDisplayRadius];
+  \node[emphasis label,below=4pt of zoom-center,yshift=-\insetDisplayRadius cm]
+    {局部放大 $\insetScale\times$};
+
+  % Neutral coordinate axes and scale bar.
+  \coordinate (axis-origin) at (-3.25,-3.05);
+  \draw[otgray!65,-{Stealth[length=1.7mm]}]
+    (axis-origin)--++(0.82,0) node[right,neutral label] {$x$（东）};
+  \draw[otgray!65,-{Stealth[length=1.7mm]}]
+    (axis-origin)--++(0,0.82) node[above,neutral label] {$y$（北）};
+
+  \coordinate (scale-left) at (3.55,-4.08);
+  \coordinate (scale-right) at (4.55,-4.08);
+  \draw[otgray,line width=1.15pt] (scale-left)--(scale-right);
+  \draw[otgray]
+    ($(scale-left)+(0,0.06)$)--($(scale-left)+(0,-0.06)$)
+    ($(scale-right)+(0,0.06)$)--($(scale-right)+(0,-0.06)$);
+  \node[neutral label,below=2pt of scale-left,xshift=0.69cm]
+    {$500\,\mathrm{m}$};
+
+  % Compact legend.
+  \coordinate (legend-start) at (-1.65,-4.08);
+  \draw[bearing line] (legend-start)--++(0.55,0);
+  \node[neutral label,anchor=west] at (-1.0,-4.08) {示向度中心线};
+  \draw[error boundary] (0.2,-4.08)--(0.7,-4.08);
+  \node[neutral label,anchor=west] at (0.8,-4.08)
+    {$\theta_i\pm1^\circ$ 边界};
+\end{tikzpicture}
+\end{document}
