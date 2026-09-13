@@ -69,7 +69,7 @@ class Problem2Config:
     optimization_mode: OptimizationMode = "robust"
     signal_fraction_power: float = 1
     signal_fraction_epsilon: float = 0.05
-    require_guaranteed_signal: bool = False
+    require_guaranteed_signal: bool = True
     candidate_region_relative_tolerance: float = 0.05
     candidate_region_absolute_tolerance: float = 2.0
     probability_tolerance: float = 0.02
@@ -1082,7 +1082,7 @@ def main() -> None:
     parser.add_argument("--x", type=float, default=0.0, help="第一次检测点 x 坐标 (米，默认 0.0)")
     parser.add_argument("--y", type=float, default=0.0, help="第一次检测点 y 坐标 (米，默认 0.0)")
     parser.add_argument("--bearing", type=float, default=0.0, help="第一次测得的示向度 (度，默认 0.0)")
-    parser.add_argument("--out", type=str, default=None, help="图片保存路径 (默认全功能为 P2_result.png, demo 为 P2_demo.png)")
+    parser.add_argument("--out", type=str, default=None, help="图片保存路径 (默认保存至脚本所在目录的 p2 文件夹，全功能为 P2_result.png，demo 为 P2_demo.png)")
     args = parser.parse_args()
 
     first_pos = (args.x, args.y)
@@ -1095,18 +1095,17 @@ def main() -> None:
             refined_grid_spacing=50.0,
             refinement_seed_count=4,
         )
-        out_path = args.out or "P2_demo.png"
+        out_path = args.out or str(Path(__file__).resolve().parent / "p2" / "P2_demo.png")
         print(">>> 当前运行模式：【快速演示模式】(--demo)。")
         print(">>> 网格参数：目标间距 60m, 粗筛间距 200m, 细筛间距 50m, 种子数 4\n")
     else:
         config = Problem2Config()
-        out_path = args.out or "P2_result.png"
+        out_path = args.out or str(Path(__file__).resolve().parent / "p2" / "P2_result.png")
         print(f">>> 当前运行模式：【默认全功能高精度模式】检测点={first_pos}, 示向度={bearing}° ...")
         print(">>> 网格参数：目标间距 20m, 粗筛间距 100m, 细筛间距 25m, 种子数 8")
         print(">>> 正在进行全情景后验推断与双层网格优化（预计耗时 1~2 分钟）...")
         print(">>> 提示：如需秒级快速测试，可追加 --demo 参数\n")
 
-    config = replace(config, require_guaranteed_signal=not args.allow_unguaranteed_signal)
     if args.signal_fraction_power is not None:
         config = replace(config, signal_fraction_power=args.signal_fraction_power)
     result = solve_problem_2(first_pos, bearing, config)

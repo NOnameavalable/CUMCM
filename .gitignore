@@ -36,6 +36,8 @@ htmlcov/
 P2_demo.png
 P3_practice_*.jsonl
 .p2_cache/
+/benchmark_guaranteed_signal.py
+/benchmark_results/
 
 # Local workspace / agent state
 .agents/

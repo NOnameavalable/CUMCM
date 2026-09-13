@@ -442,18 +442,18 @@ def refresh_channel_tasks_p4(
         mid_s = 0.5 * (searcher.s_min + searcher.s_max)
         mid = searcher.depth_to_point(mid_s)
 
-        if span <= 4.0 * config.clear_radius + 1e-9:
-            # 跨度 <= 80m：二分中点发射一炮
+        if span <= 2.0 * config.clear_radius + 1e-9:
+            # 跨度 <= 40m：中点到区间端点不超过 20m 清除半径。
             belief.center_clear_allows_residual = True
             planner.replace_channel_tasks(
                 belief.channel,
-                [make_task(TaskType.CENTER_CLEAR, mid, f"探针二分收敛<=80m({span:.1f}m)，中点二分发射一炮")],
+                [make_task(TaskType.CENTER_CLEAR, mid, f"探针二分收敛<={2.0 * config.clear_radius:g}m({span:.1f}m)，中点二分发射一炮")],
             )
             return
         else:
             mid_key = point_key(mid, config.point_precision)
             if mid_key not in measured_keys:
-                # 跨度 > 80m 且中点未测过：二分中点探针测向
+                # 跨度 > 40m 且中点未测过：二分中点探针测向
                 belief.center_clear_allows_residual = False
                 planner.replace_channel_tasks(
                     belief.channel,

@@ -1458,7 +1458,12 @@ def main(*, controller_type=Problem3Controller,
         retries=config.request_retries,
         log_path=args.log,
     )
-    print(json.dumps(controller_type(client, config).run(), ensure_ascii=False, indent=2))
+    summary = controller_type(client, config).run()
+    console_summary = {
+        key: value for key, value in summary.items()
+        if key != "shared_assignment_events"
+    }
+    print(json.dumps(console_summary, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
