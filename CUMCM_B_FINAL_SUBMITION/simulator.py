@@ -10,7 +10,7 @@ from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from utils import Point
+from CUMCM_B_FINAL_SUBMITION.utils import Point
 
 
 class SimulatorError(RuntimeError):

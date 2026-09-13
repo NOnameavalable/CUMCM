@@ -18,16 +18,16 @@ from typing import Any, Literal
 import numpy as np
 from python_tsp.heuristics import solve_tsp_local_search
 
-from P1 import Problem1Geometry, solve_problem_1_geometry
-from P2 import (
+from CUMCM_B_FINAL_SUBMITION.P1 import Problem1Geometry, solve_problem_1_geometry
+from CUMCM_B_FINAL_SUBMITION.P2 import (
     CandidateMetrics,
     Problem2Config,
     Problem2Result,
     evaluate_problem_2_candidate,
 )
-from P2_cache import get_problem_2_result
-from simulator import SimulatorClient, SimulatorError
-from utils import Point, Region, point_key
+from CUMCM_B_FINAL_SUBMITION.P2_cache import get_problem_2_result
+from CUMCM_B_FINAL_SUBMITION.simulator import SimulatorClient, SimulatorError
+from CUMCM_B_FINAL_SUBMITION.utils import Point, Region, point_key
 
 
 ObservationKind = Literal["direction", "near", "no_signal"]

@@ -11,8 +11,8 @@ from typing import Iterable
 
 import numpy as np
 
-from CUMCM_B_FINAL_SUBMITION.P2 import Problem2Result
-from CUMCM_B_FINAL_SUBMITION.utils import DetectionSector, Point, Region, minimum_enclosing_circle
+from P2 import Problem2Result
+from utils import DetectionSector, Point, Region, minimum_enclosing_circle
 
 
 @dataclass(frozen=True)

@@ -19,7 +19,7 @@ from typing import Literal, Sequence
 
 import numpy as np
 
-from utils import (
+from CUMCM_B_FINAL_SUBMITION.utils import (
     Circle,
     DetectionSector,
     Point,

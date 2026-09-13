@@ -17,8 +17,8 @@ import warnings
 import shapely
 from shapely.affinity import affine_transform
 
-from P2 import Problem2Config, Problem2Result, _validate_inputs, solve_problem_2
-from utils import DetectionSector, Point, Region
+from CUMCM_B_FINAL_SUBMITION.P2 import Problem2Config, Problem2Result, _validate_inputs, solve_problem_2
+from CUMCM_B_FINAL_SUBMITION.utils import DetectionSector, Point, Region
 
 
 CACHE_VERSION = 1

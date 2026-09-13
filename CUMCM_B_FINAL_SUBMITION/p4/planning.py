@@ -6,9 +6,9 @@ import math
 import time
 from typing import Any, Iterable
 
-from CUMCM_B_FINAL_SUBMITION.P2 import Problem2Result
-from CUMCM_B_FINAL_SUBMITION.P3 import RouteTask, TaskPlanner, TaskType
-from CUMCM_B_FINAL_SUBMITION.utils import Point, Region, minimum_enclosing_circle
+from P2 import Problem2Result
+from P3 import RouteTask, TaskPlanner, TaskType
+from utils import Point, Region, minimum_enclosing_circle
 
 from .belief import MixedCandidateEvaluation, MixedSourceBelief
 

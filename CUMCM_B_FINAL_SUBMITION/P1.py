@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from math import isfinite
 
-from utils import DetectionSector, Point, Polygon, Region
-from utils import _TOLERANCE
+from CUMCM_B_FINAL_SUBMITION.utils import DetectionSector, Point, Polygon, Region
+from CUMCM_B_FINAL_SUBMITION.utils import _TOLERANCE
 
 
 # ============================================================
